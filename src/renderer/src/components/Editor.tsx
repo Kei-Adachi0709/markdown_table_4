@@ -5,10 +5,10 @@ import { history, historyKeymap } from '@codemirror/commands';
 import { markdown, markdownLanguage, gfm } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { basicSetup } from 'codemirror';
-// import { oneDark } from '@codemirror/theme-one-dark'; // 任意
-import { tableExtension } from '../editor/extensions/TableExtension';
+// import { oneDark } from '@codemirror/theme-one-dark';
+import { tableExtension, tableKeymap } from '../editor/extensions/TableExtension';
 
-const initialMarkdown = `# Hello, Markdown (GFM)
+const initialMarkdown = `# Table demo
 
 | Name   | Age | City     |
 |--------|-----|----------|
@@ -27,35 +27,29 @@ export default function Editor() {
       basicSetup,
       history(),
       keymap.of(historyKeymap),
+
       markdown({
         base: markdownLanguage,
         codeLanguages: languages,
         extensions: [gfm()]
       }),
+
+      // Editor の変更を外へ反映
       EditorView.updateListener.of((update) => {
-        if (update.docChanged) {
-          setDoc(update.state.doc.toString());
-        }
+        if (update.docChanged) setDoc(update.state.doc.toString());
       }),
-      // oneDark, // 任意のテーマ
-      tableExtension // ← 追加（Markdownテーブルを置換しインタラクティブUIを表示）
+
+      // oneDark,
+      tableExtension,
+      tableKeymap // ← カスタムキーバインド
     ],
     []
   );
 
   useEffect(() => {
     if (!hostRef.current) return;
-
-    const state = EditorState.create({
-      doc,
-      extensions
-    });
-
-    const view = new EditorView({
-      state,
-      parent: hostRef.current
-    });
-
+    const state = EditorState.create({ doc, extensions });
+    const view = new EditorView({ state, parent: hostRef.current });
     viewRef.current = view;
     return () => {
       view.destroy();
