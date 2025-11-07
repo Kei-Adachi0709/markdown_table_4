@@ -3,9 +3,9 @@ import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { history, historyKeymap } from '@codemirror/commands';
 
-// 修正 1: gfm のインポート元を変更
+// 修正 1: gfm のインポートを完全に削除
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
-import { gfm } from '@lezer/markdown'; // <-- @codemirror/lang-markdown から削除し、こちらからインポート
+// import { gfm } from '@lezer/markdown'; // <-- この行を削除
 
 import { languages } from '@codemirror/language-data';
 import { basicSetup } from 'codemirror';
@@ -45,8 +45,8 @@ export default function Editor() {
       markdown({
         base: markdownLanguage,
         codeLanguages: languages,
-        // 修正 2: gfm() ではなく、gfm オブジェクトを渡す
-        extensions: [gfm]
+        // 修正 2: extensions プロパティ自体を削除 (gfm参照を消す)
+        // extensions: [gfm] // <-- この行を削除
       }),
 
       // Editor の変更を外へ反映 (CM -> React)
@@ -55,8 +55,8 @@ export default function Editor() {
       }),
 
       // oneDark,
-      tableExtension,
-      tableKeymap // ← カスタムキーバインド
+      tableExtension, // <-- 私たちのカスタムテーブルUI
+      tableKeymap     // <-- 私たちのカスタムキー操作
     ],
     []
   );
@@ -73,8 +73,7 @@ export default function Editor() {
     };
   }, [hostRef, extensions]);
 
-  // 修正 3: React の state が変更されたら CM に反映する (React -> CM)
-  // (これが無いと、将来的にファイルを開き直した際などにエディタが更新されない)
+  // React の state が変更されたら CM に反映する (React -> CM)
   useEffect(() => {
     if (viewRef.current && doc !== viewRef.current.state.doc.toString()) {
       viewRef.current.dispatch({
