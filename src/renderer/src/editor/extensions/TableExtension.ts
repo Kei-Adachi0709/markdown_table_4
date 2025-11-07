@@ -599,29 +599,15 @@ function buildDecorations(state: EditorState): DecorationSet {
   const blocks = parseTablesInDoc(state);
 
   for (const block of blocks) {
-    // 修正前 (2つの Decoration を別々に add していた)
-    /*
-    builder.add(block.from, block.to, Decoration.replace({ block: true }));
-    builder.add(
-      block.from,
-      block.from,
-      Decoration.widget({
-        widget: new TableWidget(block),
-        block: true,
-        side: 1
-      })
-    );
-    */
-
-    // 修正後:
-    // block.from から block.to までの範囲を、
-    // まるごと TableWidget で置き換える(replace)よう指示する
+    // ★★★ここが重要★★★
+    // 以下の Decoration.replace ブロックが
+    // 1つだけになっていることを確認してください
     builder.add(
       block.from,
       block.to,
       Decoration.replace({
-        widget: new TableWidget(block), // ここでウィジェットを指定
-        block: true, // ブロックレベルの置換としてマーク
+        widget: new TableWidget(block), // ウィジェットをここで指定
+        block: true,
         inclusive: false,
       })
     );
