@@ -2,11 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { history, historyKeymap } from '@codemirror/commands';
-// 修正前
-// import { markdown, markdownLanguage, gfm } from '@codemirror/lang-markdown';
 
-// 修正後（一時回避）
-import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+// 修正後: gfm をインポートする
+import { markdown, markdownLanguage, gfm } from '@codemirror/lang-markdown';
+
 import { languages } from '@codemirror/language-data';
 import { basicSetup } from 'codemirror';
 // import { oneDark } from '@codemirror/theme-one-dark';
@@ -19,6 +18,16 @@ const initialMarkdown = `# Table demo
 | Alice  | 24  | Tokyo    |
 | Bob    | 31  | Osaka    |
 | Carol  | 28  | Nagoya   |
+
+---
+# 資産クラス
+
+| 資産クラス | :--- | 割合 | 変更済みか | |
+|:---|:---|:---|:---|:---|
+| **SB1・V・S&P500インデックス・ファンド** | | 25% | 〇 | |
+| **SB1・先進国株式インデックス・ファンド** | | 65% | 〇 | |
+| **SB1・新興国株式インデックス・ファンド** | | 6% | 〇 | |
+| **SB1・iシェアーズ・TOPIXインデックス・ファンド** | | 4% | 〇 | |
 `;
 
 export default function Editor() {
@@ -35,7 +44,8 @@ export default function Editor() {
       markdown({
         base: markdownLanguage,
         codeLanguages: languages,
-        // extensions: [gfm()] // ← 一旦コメントアウト
+        // 修正後: gfm() を有効化し、テーブルパーサーを有効にする
+        extensions: [gfm()] 
       }),
 
       // Editor の変更を外へ反映
@@ -60,6 +70,16 @@ export default function Editor() {
       viewRef.current = null;
     };
   }, [hostRef, extensions]);
+
+  // initialDoc を doc に修正
+  useEffect(() => {
+    if (viewRef.current && doc !== viewRef.current.state.doc.toString()) {
+      viewRef.current.dispatch({
+        changes: { from: 0, to: viewRef.current.state.doc.length, insert: doc }
+      });
+    }
+  }, [doc]);
+
 
   return (
     <div className="editor-container">

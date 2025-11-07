@@ -599,9 +599,9 @@ function buildDecorations(state: EditorState): DecorationSet {
   const blocks = parseTablesInDoc(state);
 
   for (const block of blocks) {
-    // 原文のテーブルMarkdownを非表示（置換）
+    // 修正前 (2つの Decoration を別々に add していた)
+    /*
     builder.add(block.from, block.to, Decoration.replace({ block: true }));
-    // 置換位置にウィジェットを挿入
     builder.add(
       block.from,
       block.from,
@@ -609,6 +609,20 @@ function buildDecorations(state: EditorState): DecorationSet {
         widget: new TableWidget(block),
         block: true,
         side: 1
+      })
+    );
+    */
+
+    // 修正後:
+    // block.from から block.to までの範囲を、
+    // まるごと TableWidget で置き換える(replace)よう指示する
+    builder.add(
+      block.from,
+      block.to,
+      Decoration.replace({
+        widget: new TableWidget(block), // ここでウィジェットを指定
+        block: true, // ブロックレベルの置換としてマーク
+        inclusive: false,
       })
     );
   }
