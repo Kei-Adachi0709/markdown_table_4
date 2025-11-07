@@ -5,27 +5,16 @@ import { history, historyKeymap } from '@codemirror/commands';
 import { markdown, markdownLanguage, gfm } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { basicSetup } from 'codemirror';
-import { oneDark } from '@codemirror/theme-one-dark';
-// 上記 oneDark を使わない場合は依存から外してOK（好みでテーマ調整）
-
-// 後で実装するテーブル拡張（現在はスタブ）
+// import { oneDark } from '@codemirror/theme-one-dark'; // 任意
 import { tableExtension } from '../editor/extensions/TableExtension';
 
 const initialMarkdown = `# Hello, Markdown (GFM)
-
-- CodeMirror 6 ベースのエディタです
-- GFM対応（チェックボックス、テーブル等）
-
-## テーブル例（GFM）
 
 | Name   | Age | City     |
 |--------|-----|----------|
 | Alice  | 24  | Tokyo    |
 | Bob    | 31  | Osaka    |
 | Carol  | 28  | Nagoya   |
-
-- [ ] Todo 1
-- [x] Todo 2
 `;
 
 export default function Editor() {
@@ -38,7 +27,6 @@ export default function Editor() {
       basicSetup,
       history(),
       keymap.of(historyKeymap),
-      // GFM（テーブル/タスクリスト/ストライクスルー等）
       markdown({
         base: markdownLanguage,
         codeLanguages: languages,
@@ -46,22 +34,11 @@ export default function Editor() {
       }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
-          const value = update.state.doc.toString();
-          setDoc(value);
+          setDoc(update.state.doc.toString());
         }
       }),
-      EditorView.theme(
-        {
-          '&': { height: '100%', fontSize: '14px' },
-          '.cm-content': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace' },
-          '.cm-scroller': { overflow: 'auto' }
-        },
-        { dark: false }
-      ),
-      // 好みでOneDarkなどのテーマを追加可能
-      // oneDark,
-      // ここにカスタム・テーブル拡張を追加（現状はスタブ）
-      tableExtension
+      // oneDark, // 任意のテーマ
+      tableExtension // ← 追加（Markdownテーブルを置換しインタラクティブUIを表示）
     ],
     []
   );
@@ -80,7 +57,6 @@ export default function Editor() {
     });
 
     viewRef.current = view;
-
     return () => {
       view.destroy();
       viewRef.current = null;
