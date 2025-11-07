@@ -9,7 +9,8 @@ import {
   EditorState,
   RangeSetBuilder,
   TransactionSpec,
-  StateField
+  StateField,
+  Prec // 1. Prec をインポート
 } from '@codemirror/state';
 
 type Align = 'left' | 'center' | 'right' | null;
@@ -218,16 +219,8 @@ class TableWidget extends WidgetType {
     return true;
   }
 
-  private dispatchReplace(view: EditorView, updated: TableBlock, after?: () => void) {
-    const newText = serializeTable(updated);
-    const tr: TransactionSpec = {
-      changes: { from: this.block.from, to: this.block.to, insert: newText }
-    };
-    view.dispatch(tr);
-    if (after) setTimeout(after, 0);
-  }
-
   private focusCellAt(view: EditorView, from: number, row: number | null, col: number) {
+    // 3. この関数 (TableWidget内) の setTimeout を削除
     try {
       const tryFocus = () => {
         const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
@@ -250,7 +243,8 @@ class TableWidget extends WidgetType {
           s?.addRange(r);
         }
       };
-      setTimeout(tryFocus, 0);
+      // setTimeout(tryFocus, 0); // <-- この行を削除
+      tryFocus(); // <-- 即時実行する
     } catch {
       /* noop */
     }
@@ -662,6 +656,7 @@ function getActiveCellContext(view: EditorView) {
 }
 
 function focusCell(view: EditorView, from: number, row: number | null, col: number) {
+  // 4. この関数 (グローバルスコープ) の setTimeout も削除
   const tryFocus = () => {
     const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
     if (!container) return;
@@ -674,7 +669,8 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
     }
     target?.focus();
   };
-  setTimeout(tryFocus, 0);
+  // setTimeout(tryFocus, 0); // <-- この行を削除
+  tryFocus(); // <-- 即時実行する
 }
 
 function cmdTab(view: EditorView): boolean {
@@ -829,7 +825,8 @@ function copySelectionTSV(view: EditorView): boolean {
   return true;
 }
 
-export const tableKeymap = keymap.of([
+// 5. tableKeymap の定義を Prec.high でラップし、優先度を上げる
+export const tableKeymap = Prec.high(keymap.of([
   { key: 'Tab', run: cmdTab },
   { key: 'Shift-Tab', run: cmdShiftTab },
   { key: 'Enter', run: cmdEnter },
@@ -838,7 +835,7 @@ export const tableKeymap = keymap.of([
   { key: 'ArrowRight', run: (v) => moveHorizontal(v, 1) },
   { key: 'ArrowUp', run: (v) => moveVertical(v, -1) },
   { key: 'ArrowDown', run: (v) => moveVertical(v, 1) }
-]);
+]));
 
 // これがエディタに組み込む拡張（StateField 経由で block decorations を提供）
 export const tableExtension = [tableDecoField] as const;
