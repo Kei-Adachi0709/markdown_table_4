@@ -7,14 +7,14 @@ process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 let win: BrowserWindow | null = null;
 
 function resolvePreloadPath() {
-  // out/main/ または dist/main/ からの相対で .js/.mjs の存在を確認
-  const candidates = ['../preload/index.js', '../preload/index.mjs'];
+  // out/ or dist/ 配下のいずれでも動くように拡張子を順に探索
+  const candidates = ['../preload/index.cjs', '../preload/index.js', '../preload/index.mjs'];
   for (const rel of candidates) {
     const p = join(__dirname, rel);
     if (existsSync(p)) return p;
   }
-  // 最後のフォールバック（通常は到達しない）
-  return join(__dirname, '../preload/index.js');
+  // 最後のフォールバック
+  return join(__dirname, '../preload/index.cjs');
 }
 
 async function createWindow() {
@@ -30,11 +30,9 @@ async function createWindow() {
   });
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    // electron-vite dev server
     await win.loadURL(process.env['ELECTRON_RENDERER_URL']);
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
-    // production build
     await win.loadFile(join(__dirname, '../renderer/index.html'));
   }
 }
