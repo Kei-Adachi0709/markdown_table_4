@@ -2,7 +2,7 @@
   "name": "electron-cm6-markdown-gfm",
   "version": "0.1.0",
   "private": true,
-  "main": "dist/main/index.js",
+  "main": "out/main/index.js",
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
@@ -12,12 +12,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@codemirror/lang-markdown": "^6.2.1",
+    "@codemirror/language-data": "^6.5.1",
+    "@lezer/markdown": "^1.0.2",
     "codemirror": "^6.0.1",
     "electron": "^32.2.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@codemirror/lang-markdown": "^6.2.0",
-    "@codemirror/language-data": "^6.5.1"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",

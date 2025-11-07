@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import { history, historyKeymap } from '@codemirror/commands';
-import { markdown, markdownLanguage, gfm } from '@codemirror/lang-markdown';
+// 修正前
+// import { markdown, markdownLanguage, gfm } from '@codemirror/lang-markdown';
+
+// 修正後（一時回避）
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { basicSetup } from 'codemirror';
 // import { oneDark } from '@codemirror/theme-one-dark';
@@ -31,7 +35,7 @@ export default function Editor() {
       markdown({
         base: markdownLanguage,
         codeLanguages: languages,
-        extensions: [gfm()]
+        // extensions: [gfm()] // ← 一旦コメントアウト
       }),
 
       // Editor の変更を外へ反映
