@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
+    "start": "npm run dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit"
