@@ -1,94 +1,65 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { EditorState, Extension } from '@codemirror/state';
+import React, { useEffect, useRef, useState } from 'react';
+import { EditorState, Prec } from '@codemirror/state'; // ★ Prec をインポート
 import { EditorView, keymap } from '@codemirror/view';
-import { history, historyKeymap } from '@codemirror/commands';
-
-// 修正 1: gfm のインポートを完全に削除
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
-// import { gfm } from '@lezer/markdown'; // <-- この行を削除
-
 import { languages } from '@codemirror/language-data';
-import { basicSetup } from 'codemirror';
-// import { oneDark } from '@codemirror/theme-one-dark';
-import { tableExtension, tableKeymap } from '../editor/extensions/TableExtension';
+import { defaultKeymap } from '@codemirror/commands';
+import { autocompletion } from '@codemirror/autocomplete';
 
-const initialMarkdown = `# Table demo
+// ★ インポートを追加
+import { tableExtension, tableKeymap } from './extensions/TableExtension';
 
-| Name   | Age | City     |
-|--------|-----|----------|
-| Alice  | 24  | Tokyo    |
-| Bob    | 31  | Osaka    |
-| Carol  | 28  | Nagoya   |
+// ... (他のインポート) ...
 
----
-# 資産クラス
+// ... (EditorProps や interface) ...
 
-| 資産クラス | :--- | 割合 | 変更済みか | |
-|:---|:---|:---|:---|:---|
-| **SB1・V・S&P500インデックス・ファンド** | | 25% | 〇 | |
-| **SB1・先進国株式インデックス・ファンド** | | 65% | 〇 | |
-| **SB1・新興国株式インデックス・ファンド** | | 6% | 〇 | |
-| **SB1・iシェアーズ・TOPIXインデックス・ファンド** | | 4% | 〇 | |
-`;
-
-export default function Editor() {
-  const hostRef = useRef<HTMLDivElement | null>(null);
+const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
+  const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const [doc, setDoc] = useState<string>(initialMarkdown);
 
-  const extensions = useMemo<Extension[]>(
-    () => [
-      basicSetup,
-      history(),
-      keymap.of(historyKeymap),
+  // ... (他の useEffect やロジック) ...
 
+  useEffect(() => {
+    if (!editorRef.current) return;
+
+    // ★ 既存の extensions 配列を定義している場所を探す
+    // (これは一例です。実際の構造に合わせてください)
+    const extensions = [
+      // ... (既存の history(), highlightActiveLineGutter() など ...)
+      keymap.of(defaultKeymap),
       markdown({
         base: markdownLanguage,
         codeLanguages: languages,
-        // 修正 2: extensions プロパティ自体を削除 (gfm参照を消す)
-        // extensions: [gfm] // <-- この行を削除
+        addKeymap: true
       }),
+      autocompletion(),
+      // ... (既存の theme など ...)
 
-      // Editor の変更を外へ反映 (CM -> React)
-      EditorView.updateListener.of((update) => {
-        if (update.docChanged) setDoc(update.state.doc.toString());
-      }),
+      // ★ ここにテーブル拡張機能を追加します
+      tableExtension,       // テーブルの描画 (Widget)
+      Prec.high(tableKeymap)  // テーブルのキー操作 (Enter, Tab, 矢印)
 
-      // oneDark,
-      tableExtension, // <-- 私たちのカスタムテーブルUI
-      tableKeymap     // <-- 私たちのカスタムキー操作
-    ],
-    []
-  );
+      // ... (既存の updateListener など ...)
+    ];
 
-  // エディタの初期化
-  useEffect(() => {
-    if (!hostRef.current) return;
-    const state = EditorState.create({ doc, extensions });
-    const view = new EditorView({ state, parent: hostRef.current });
+    const startState = EditorState.create({
+      doc: initialValue,
+      extensions: extensions // ★ 修正済みの extensions を渡す
+    });
+
+    const view = new EditorView({
+      state: startState,
+      parent: editorRef.current
+    });
+
     viewRef.current = view;
+
     return () => {
       view.destroy();
-      viewRef.current = null;
     };
-  }, [hostRef, extensions]);
+  }, [editorRef, initialValue, onChange]); // 依存配列は適宜調整してください
 
-  // React の state が変更されたら CM に反映する (React -> CM)
-  useEffect(() => {
-    if (viewRef.current && doc !== viewRef.current.state.doc.toString()) {
-      viewRef.current.dispatch({
-        changes: { from: 0, to: viewRef.current.state.doc.length, insert: doc }
-      });
-    }
-  }, [doc]);
+  return <div ref={editorRef} className="editor-container" />;
+};
 
-
-  return (
-    <div className="editor-container">
-      <div className="editor-toolbar">
-        <span>Length: {doc.length} chars</span>
-      </div>
-      <div className="editor-host" ref={hostRef} />
-    </div>
-  );
-}
+export default Editor;
