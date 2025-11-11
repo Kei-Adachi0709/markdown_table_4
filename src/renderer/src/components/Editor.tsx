@@ -14,10 +14,10 @@ import {
   historyKeymap
 } from '@codemirror/commands';
 import { autocompletion } from '@codemirror/autocomplete';
-import {
-  highlightActiveLineGutter,
-  lineNumbers
-} from '@codemirror/gutter';
+// import {
+//   highlightActiveLineGutter,
+//   lineNumbers
+// } from '@codemirror/gutter';
 import { searchKeymap, search } from '@codemirror/search';
 import { indentOnInput } from '@codemirror/language';
 import { bracketMatching } from '@codemirror/matchbrackets';
@@ -47,8 +47,8 @@ const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
     // 拡張機能の配列
     const extensions = [
       // --- 基本機能 ---
-      lineNumbers(),
-      highlightActiveLineGutter(),
+      // lineNumbers(),
+      // highlightActiveLineGutter(),
       history(),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
       indentOnInput(),
