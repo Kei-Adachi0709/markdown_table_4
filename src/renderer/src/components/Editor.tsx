@@ -33,7 +33,8 @@ interface EditorProps {
  * CodeMirror 6 (GFM + カスタムテーブル) を搭載した React エディタコンポーネント
  * [最小構成版]
  */
-const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
+ // ★★★ 修正 (v2): onChange にデフォルト値を追加 ★★★
+const Editor: React.FC<EditorProps> = ({ initialValue, onChange = () => {} }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
 
@@ -70,7 +71,7 @@ const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
         if (update.docChanged) {
           const newValue = update.state.doc.toString();
           // 外部のコンポーネント (App.tsx など) に変更を通知
-          onChange(newValue);
+          onChange(newValue); // ★ デフォルト値があるのでエラーにならない
         }
       })
     ];

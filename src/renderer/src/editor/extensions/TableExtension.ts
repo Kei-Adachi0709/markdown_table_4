@@ -71,10 +71,11 @@ function parseTablesInDoc(state: EditorState): TableBlock[] {
       const aligns: Align[] = [];
       const rows: string[][] = [];
 
-      let state: 'header' | 'align' | 'row' = 'header';
+      let stateLoop: 'header' | 'align' | 'row' = 'header';
 
       for (let child = node.node.firstChild; child; child = child.nextSibling) {
-        const lineText = state.sliceDoc(child.from, child.to);
+        // ★★★ 修正 (v5): state.sliceDoc -> state.doc.sliceString ★★★
+        const lineText = state.doc.sliceString(child.from, child.to);
 
         if (child.name === 'TableHeader') {
           // ヘッダー行
@@ -82,7 +83,7 @@ function parseTablesInDoc(state: EditorState): TableBlock[] {
           if (parts[0] === '') parts.shift();
           if (parts[parts.length - 1] === '') parts.pop();
           headers.push(...parts);
-          state = 'align';
+          stateLoop = 'align';
         } else if (child.name === 'TableDelim') {
           // 分割行
           const parts = lineText.split('|').map(s => s.trim());
@@ -98,7 +99,7 @@ function parseTablesInDoc(state: EditorState): TableBlock[] {
             else if (right) aligns.push('right');
             else aligns.push(null);
           });
-          state = 'row';
+          stateLoop = 'row';
         } else if (child.name === 'TableRow') {
           // データ行
           const parts = lineText.split('|').map(s => s.trim());
@@ -480,10 +481,8 @@ class TableWidget extends WidgetType {
 
 // ---- Decorations ----
 
-// ★★★ 修正: (view: EditorView) から (state: EditorState) に変更 ★★★
 function buildDecorations(state: EditorState): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
-  // ★★★ 修正: view.state ではなく state を渡す ★★★
   const blocks = parseTablesInDoc(state);
 
   for (const block of blocks) {
@@ -499,15 +498,12 @@ function buildDecorations(state: EditorState): DecorationSet {
   return builder.finish();
 }
 
-// ★★★ 修正: 'export' を追加 & 呼び出し方を修正 ★★★
 export const tableDecoField = StateField.define<DecorationSet>({
   create(state) {
-    // ★★★ 修正: new EditorView(state) ではなく state を渡す ★★★
     return buildDecorations(state);
   },
   update(value, tr) {
     if (!tr.docChanged) return value;
-    // ★★★ 修正: new EditorView(tr.state) ではなく tr.state を渡す ★★★
     return buildDecorations(tr.state);
   },
   provide: (f) => EditorView.decorations.from(f)
@@ -699,6 +695,7 @@ export const tableKeymap = keymap.of([
   { key: 'ArrowDown', run: moveVertical('down') },
   { key: 'Enter', run: cmdEnter },
   { key: 'Tab', run: cmdTab },
+  // ★★★ 修正 (v6): 'key:Key:' -> 'key:' ★★★
   { key: 'Shift-Tab', run: cmdShiftTab },
   { key: 'Mod-c', run: copySelectionTSV },
 ]);
