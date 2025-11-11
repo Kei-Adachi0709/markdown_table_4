@@ -3,8 +3,7 @@ import { EditorState, Prec } from '@codemirror/state';
 import {
   EditorView,
   keymap,
-  ViewUpdate,
-  highlightActiveLine
+  ViewUpdate
 } from '@codemirror/view';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
@@ -13,18 +12,15 @@ import {
   history,
   historyKeymap
 } from '@codemirror/commands';
-import { autocompletion } from '@codemirror/autocomplete';
-// import {
-//   highlightActiveLineGutter,
-//   lineNumbers
-// } from '@codemirror/gutter';
-import { searchKeymap, search } from '@codemirror/search';
-import { indentOnInput } from '@codemirror/language';
-import { bracketMatching } from '@codemirror/matchbrackets';
 
-// ★★★ ここが修正点 ★★★
-// './extensions/...' (components フォルダ内) ではなく、
-// '../editor/extensions/...' (components の外にある editor フォルダ内) を参照するように変更
+// ★★★ 修正: テーブル以外の追加機能をすべて削除 ★★★
+// import { autocompletion } from '@codemirror/autocomplete';
+// import { searchKeymap, search } from '@codemirror/search';
+// import { indentOnInput } from '@codemirror/language';
+// import { bracketMatching } from '@codemirror/matchbrackets';
+// import { highlightActiveLine } from '@codemirror/view';
+
+// '../editor/...' のパス（修正済み）
 import { tableExtension, tableKeymap } from '../editor/extensions/TableExtension';
 
 // Editor コンポーネントが受け取るプロパティの型
@@ -35,6 +31,7 @@ interface EditorProps {
 
 /**
  * CodeMirror 6 (GFM + カスタムテーブル) を搭載した React エディタコンポーネント
+ * [最小構成版]
  */
 const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -44,18 +41,18 @@ const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
   useEffect(() => {
     if (!editorRef.current) return;
 
-    // 拡張機能の配列
+    // 拡張機能の配列 (最小構成)
     const extensions = [
       // --- 基本機能 ---
-      // lineNumbers(),
-      // highlightActiveLineGutter(),
       history(),
-      keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
-      indentOnInput(),
-      bracketMatching(),
-      highlightActiveLine(),
-      autocompletion(),
-      search(),
+      keymap.of([...defaultKeymap, ...historyKeymap]), // ★ searchKeymap を削除
+
+      // ★★★ 削除: 以下の追加機能をすべて削除 ★★★
+      // indentOnInput(),
+      // bracketMatching(),
+      // highlightActiveLine(),
+      // autocompletion(),
+      // search(),
 
       // --- Markdown (GFM) ---
       markdown({
@@ -101,8 +98,7 @@ const Editor: React.FC<EditorProps> = ({ initialValue, onChange }) => {
     // onChange が変更された場合 (通常は関数定義が変わらない) に備えて依存配列に含める
   }, [editorRef, onChange]);
 
-  // 外部から initialValue が変更された場合に対応
-  // (例: App.tsx でファイルを開き直したなど)
+  // (中略: 外部からの initialValue が変更された場合の useEffect は変更なし)
   useEffect(() => {
     if (
       viewRef.current &&
