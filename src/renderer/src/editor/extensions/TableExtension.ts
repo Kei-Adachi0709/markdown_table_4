@@ -503,7 +503,8 @@ function buildDecorations(view: EditorView): DecorationSet {
   return builder.finish();
 }
 
-const tableDecoField = StateField.define<DecorationSet>({
+// ★★★ 修正: 'export' を追加 ★★★
+export const tableDecoField = StateField.define<DecorationSet>({
   create(state) {
     return buildDecorations(new EditorView(state)); // view を初期化
   },
@@ -689,7 +690,8 @@ function copySelectionTSV(view: EditorView): boolean {
   return false;
 }
 
-const tableKeymap = keymap.of([
+// ★★★ 修正: 'export' を追加 ★★★
+export const tableKeymap = keymap.of([
   { key: 'ArrowLeft', run: moveHorizontal('left') },
   { key: 'ArrowRight', run: moveHorizontal('right') },
   { key: 'ArrowUp', run: moveVertical('up') },
@@ -700,9 +702,7 @@ const tableKeymap = keymap.of([
   { key: 'Mod-c', run: copySelectionTSV },
 ]);
 
-// ★★★ エラーの原因だった export ★★★
+// ★★★ 修正: tableDecoField のみを含むように変更 ★★★
 export const tableExtension = [
-  Prec.high(tableKeymap),
   tableDecoField,
-  // EditorView.decorations.of((view) => view.state.field(tableDecoField)), // StateField.provide で提供
 ];
