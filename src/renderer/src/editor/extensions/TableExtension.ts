@@ -10,11 +10,130 @@ import {
   RangeSetBuilder,
   TransactionSpec,
   StateField,
-  Prec
+  Prec,
+  RangeValue,
+  RangeSet
 } from '@codemirror/state';
+import { syntaxTree } from '@codemirror/language';
 
-// ... (interface TableBlock やヘルパー関数は変更なし) ...
-// ... (parseTablesInDoc, getTableWidgetContainer, getCellRC, clamp は変更なし) ...
+// ---- Types and Helpers ----
+
+type Align = 'left' | 'right' | 'center' | null;
+
+interface TableBlock {
+  from: number;
+  to: number;
+  headers: string[];
+  aligns: Align[];
+  rows: string[][];
+}
+
+// テーブルを Markdown テキストに戻す
+function serializeTable(block: TableBlock): string {
+  const colCount = Math.max(block.headers.length, ...block.rows.map(r => r.length));
+  const headers = Array.from({ length: colCount }, (_, i) => block.headers[i] ?? '');
+  const aligns = Array.from({ length: colCount }, (_, i) => block.aligns[i] ?? null);
+  const rows = block.rows.map(row => Array.from({ length: colCount }, (_, i) => row[i] ?? ''));
+
+  // TODO: セルの内容をエスケープする
+  const escape = (s: string) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+
+  const lines: string[] = [];
+  lines.push(`| ${headers.map(escape).join(' | ')} |`);
+  lines.push(`| ${aligns
+    .map(a => {
+      if (a === 'left') return ':---';
+      if (a === 'right') return '---:';
+      if (a === 'center') return ':---:';
+      return '---';
+    })
+    .join(' | ')} |`);
+
+  rows.forEach(row => {
+    lines.push(`| ${row.map(escape).join(' | ')} |`);
+  });
+
+  return lines.join('\n');
+}
+
+// ドキュメント全体をパースしてテーブルブロックの配列を返す
+function parseTablesInDoc(state: EditorState): TableBlock[] {
+  const blocks: TableBlock[] = [];
+  const tree = syntaxTree(state);
+
+  tree.iterate({
+    enter: (node) => {
+      if (node.name !== 'Table') return;
+
+      const from = node.from;
+      const to = node.to;
+      const headers: string[] = [];
+      const aligns: Align[] = [];
+      const rows: string[][] = [];
+
+      let state: 'header' | 'align' | 'row' = 'header';
+
+      for (let child = node.node.firstChild; child; child = child.nextSibling) {
+        const lineText = state.sliceDoc(child.from, child.to);
+
+        if (child.name === 'TableHeader') {
+          // ヘッダー行
+          const parts = lineText.split('|').map(s => s.trim());
+          if (parts[0] === '') parts.shift();
+          if (parts[parts.length - 1] === '') parts.pop();
+          headers.push(...parts);
+          state = 'align';
+        } else if (child.name === 'TableDelim') {
+          // 分割行
+          const parts = lineText.split('|').map(s => s.trim());
+          if (parts[0] === '') parts.shift();
+  
+          if (parts[parts.length - 1] === '') parts.pop();
+
+          parts.forEach(p => {
+            const left = p.startsWith(':');
+            const right = p.endsWith(':');
+            if (left && right) aligns.push('center');
+            else if (left) aligns.push('left');
+            else if (right) aligns.push('right');
+            else aligns.push(null);
+          });
+          state = 'row';
+        } else if (child.name === 'TableRow') {
+          // データ行
+          const parts = lineText.split('|').map(s => s.trim());
+          if (parts[0] === '') parts.shift();
+          if (parts[parts.length - 1] === '') parts.pop();
+          rows.push(parts);
+        }
+      }
+
+      blocks.push({ from, to, headers, aligns, rows });
+    }
+  });
+  return blocks;
+}
+
+// DOM 要素からウィジェットコンテナを探す
+function getTableWidgetContainer(el: HTMLElement | null): HTMLElement | null {
+  if (!el) return null;
+  return el.closest<HTMLElement>('.cm-md-table-widget');
+}
+
+// DOM 要素 (th/td) から (row, col) を取得
+function getCellRC(el: HTMLElement | null): { row: number | null; col: number } | null {
+  if (!el || (el.tagName !== 'TH' && el.tagName !== 'TD')) return null;
+  const col = el.cellIndex;
+  const rowEl = el.closest('tr');
+  if (!rowEl) return null;
+  const head = rowEl.closest('thead');
+  if (head) return { row: null, col };
+  return { row: rowEl.rowIndex - 1, col }; // <tbody> の <tr> は rowIndex が 1 から始まる (thead があれば)
+}
+
+function clamp(val: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, val));
+}
 
 // ---- Widget ----
 class TableWidget extends WidgetType {
@@ -24,17 +143,23 @@ class TableWidget extends WidgetType {
 
   eq(other: WidgetType): boolean {
     if (!(other instanceof TableWidget)) return false;
-    // ... (eq の中身は変更なし) ...
+    if (other.block.from !== this.block.from ||
+        other.block.to !== this.block.to ||
+        other.block.headers.join('|') !== this.block.headers.join('|') ||
+        other.block.rows.map(r => r.join('|')).join('||') !== this.block.rows.map(r => r.join('|')).join('||')
+    ) return false;
     return true;
   }
 
   ignoreEvent(event: Event): boolean {
     // key イベントはエディタに流す（keymap を効かせる）
     if (event.type === 'keydown' || event.type === 'keyup') return false;
+    // それ以外の DOM イベント (click, input, contextmenu...) はウィジェット内で処理し、
+    // エディタには伝播させない (カーソル移動などを防ぐ)
     return true;
   }
 
-  // ★★★ここから下を修正 (メソッドをアロー関数形式 = に変更)★★★
+  // ★★★ここから下をアロー関数 (=) 形式に変更★★★
 
   private dispatchReplace = (view: EditorView, updated: TableBlock, after?: () => void) => {
     const newText = serializeTable(updated);
@@ -70,7 +195,8 @@ class TableWidget extends WidgetType {
           s?.addRange(r);
         }
       };
-      tryFocus();
+      // dispatch が同期的でない場合があるので、少し待ってからフォーカス
+      setTimeout(tryFocus, 0);
     } catch {
       /* noop */
     }
@@ -143,26 +269,62 @@ class TableWidget extends WidgetType {
     container.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
 
     const menu = document.createElement('div');
-    // ... (menu.style 設定は変更なし) ...
+    menu.className = 'cm-table-menu';
+    menu.style.position = 'fixed';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    menu.style.backgroundColor = 'white';
+    menu.style.border = '1px solid #ccc';
+    menu.style.boxShadow = '0 2px 5px rgba(0,0,0,0.2)';
+    menu.style.zIndex = '1000';
+    menu.style.padding = '4px 0';
+    menu.style.fontFamily = 'sans-serif';
+    menu.style.fontSize = '14px';
+    menu.style.minWidth = '120px';
 
     const mkItem = (label: string, cb: () => void, enabled = true) => {
-      // ... (mkItem の中身は変更なし) ...
+      const it = document.createElement('div');
+      it.style.padding = '4px 12px';
+      it.style.cursor = enabled ? 'pointer' : 'default';
+      it.style.color = enabled ? '#333' : '#aaa';
+      it.textContent = label;
+      if (enabled) {
+        it.addEventListener('click', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          cb();
+          menu.remove();
+        });
+        it.addEventListener('mouseenter', () => (it.style.backgroundColor = '#f0f0f0'));
+        it.addEventListener('mouseleave', () => (it.style.backgroundColor = 'white'));
+      }
       return it;
     };
 
-    // ... (closeOnOutside は変更なし) ...
+    const closeOnOutside = (e: MouseEvent) => {
+      if (!menu.contains(e.target as Node)) {
+        menu.remove();
+        document.removeEventListener('click', closeOnOutside);
+      }
+    };
+    // 少し遅れて登録 (contextmenu イベントが即座に click を発火させないように)
+    setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
 
     const rowOpsEnabled = rc.row != null;
     const colOpsEnabled = true;
 
-    // Row ops (this.insertRow などがアロー関数になったので 'this' が束縛される)
+    // Row ops
     menu.appendChild(mkItem('上に行を挿入', () => this.insertRow(view, container, rc.col, rc.row!, 'above'), rowOpsEnabled));
     menu.appendChild(mkItem('下に行を挿入', () => this.insertRow(view, container, rc.col, rc.row!, 'below'), rowOpsEnabled));
     menu.appendChild(mkItem('行を削除', () => this.deleteRow(view, container, rc.row!), rowOpsEnabled));
 
-    // ... (sep は変更なし) ...
+    const sep = document.createElement('div');
+    sep.style.height = '1px';
+    sep.style.backgroundColor = '#eee';
+    sep.style.margin = '4px 0';
+    menu.appendChild(sep);
 
-    // Col ops (this.insertCol などがアロー関数になったので 'this' が束縛される)
+    // Col ops
     menu.appendChild(mkItem('左に列を挿入', () => this.insertCol(view, container, rc.col, 'left'), colOpsEnabled));
     menu.appendChild(mkItem('右に列を挿入', () => this.insertCol(view, container, rc.col, 'right'), colOpsEnabled));
     menu.appendChild(mkItem('列を削除', () => this.deleteCol(view, container, rc.col), colOpsEnabled));
@@ -180,13 +342,31 @@ class TableWidget extends WidgetType {
     view: EditorView
   ) => {
     const el = document.createElement(tag);
-    // ... (el の設定は変更なし) ...
+    el.contentEditable = 'true';
+    el.textContent = text;
+    el.style.minWidth = '50px';
+    el.style.textAlign = al ?? 'left';
+    el.style.padding = '4px 8px';
+    el.style.border = '1px solid #ccc';
+    el.style.position = 'relative'; // for selection
+    el.style.outline = 'none';
+
+    // セル編集中にカーソルが外れないように
+    el.addEventListener('focus', () => {
+      el.style.boxShadow = 'inset 0 0 0 2px #007bff';
+    });
+    el.addEventListener('blur', () => {
+      el.style.boxShadow = 'none';
+      commit(); // blur 時にコミット
+    });
 
     const extractValue = () => (el.textContent ?? '').replace(/\r?\n/g, ' ');
     const commit = () => updateValue(extractValue());
 
-    el.addEventListener('input', () => commit());
-    el.addEventListener('blur', () => commit());
+    el.addEventListener('input', () => {
+      // input イベントは即時コミットしない（重すぎるため）
+      // commit() 
+    });
     
     // ★★★ keydown リスナーを修正 ★★★
     el.addEventListener('keydown', (e) => {
@@ -207,7 +387,10 @@ class TableWidget extends WidgetType {
 
     // 矩形選択 (アロー関数なので 'this' はOK)
     el.addEventListener('mousedown', (e) => {
-      // ... (中身は変更なし) ...
+      // mousedown でフォーカスを当てる
+      // ただし、デフォルトのフォーカス処理に任せるとカーソル位置が先頭になる場合がある
+      // e.preventDefault(); // これをすると focus が当たらなくなる
+      // el.focus();
     });
 
     // 右クリックメニュー (アロー関数なので 'this' はOK)
@@ -226,21 +409,34 @@ class TableWidget extends WidgetType {
   // ★ toDOM はアロー関数 ( = ) に *しない*
   toDOM(view: EditorView): HTMLElement {
     const container = document.createElement('div');
-    // ... (container の設定は変更なし) ...
+    container.className = 'cm-md-table-widget';
+    container.style.padding = '4px';
+    container.style.border = '1px dashed #ddd';
+    container.style.borderRadius = '4px';
+    container.style.margin = '1em 0';
 
     const table = document.createElement('table');
-    // ... (table の設定は変更なし) ...
+    table.style.borderCollapse = 'collapse';
+    table.style.width = '100%';
 
     const thead = document.createElement('thead');
     const trh = document.createElement('tr');
+    trh.style.backgroundColor = '#f8f8f8';
 
-    // ... (colCount, container.dataset は変更なし) ...
+    const colCount = Math.max(
+      this.block.headers.length,
+      this.block.aligns.length,
+      ...this.block.rows.map(r => r.length)
+    );
+    container.dataset.from = this.block.from.toString();
+    container.dataset.colCount = colCount.toString();
+    container.dataset.rowCount = this.block.rows.length.toString();
 
     const headers = Array.from({ length: colCount }, (_, i) => this.block.headers[i] ?? '');
     const aligns = Array.from({ length: colCount }, (_, i) => this.block.aligns[i] ?? null);
 
     headers.forEach((text, col) => {
-      // 'this.buildCell' を呼ぶ (this は toDOM の this = TableWidget)
+      // 'this.buildCell' を呼ぶ
       const th = this.buildCell('th', text, col, null, aligns[col] ?? null, (val) => {
         const updated: TableBlock = {
           ...this.block,
@@ -272,15 +468,109 @@ class TableWidget extends WidgetType {
       tbody.appendChild(tr);
     });
 
-    // ... (styleSel, table.appendChild, return container は変更なし) ...
+    const styleSel = document.createElement('style');
+    styleSel.textContent = `
+      .cm-md-table-widget td[data-selected="true"],
+      .cm-md-table-widget th[data-selected="true"] {
+        background-color: #d0e0ff;
+      }
+    `;
+
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    container.appendChild(styleSel);
+    container.appendChild(table);
     return container;
   }
-} // ★★★ クラス定義はここまで ★★★
+}
 
-// ... (buildDecorations, tableDecoField は変更なし) ...
-// ... (getActiveCellContext, focusCell, cmdTab, cmdShiftTab は変更なし) ...
+// ---- Decorations ----
 
-// ★ cmdEnter が `block` を最新の state から取得するように修正
+function buildDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>();
+  const blocks = parseTablesInDoc(view.state);
+
+  for (const block of blocks) {
+    builder.add(
+      block.from,
+      block.to,
+      Decoration.replace({
+        widget: new TableWidget(block)
+      })
+    );
+  }
+
+  return builder.finish();
+}
+
+const tableDecoField = StateField.define<DecorationSet>({
+  create(state) {
+    return buildDecorations(new EditorView(state)); // view を初期化
+  },
+  update(value, tr) {
+    if (!tr.docChanged) return value;
+    // TODO: もっと効率的に
+    return buildDecorations(new EditorView(tr.state));
+  },
+  provide: (f) => EditorView.decorations.from(f)
+});
+
+// ---- Keymap ----
+
+// アクティブなセルのコンテキストを取得 (矢印キー移動用)
+function getActiveCellContext(view: EditorView) {
+  const sel = view.state.selection.main;
+  const focused = view.hasFocus ? document.activeElement : null;
+  if (!focused || (focused.tagName !== 'TH' && focused.tagName !== 'TD')) return null;
+
+  const container = getTableWidgetContainer(focused as HTMLElement);
+  if (!container) return null;
+
+  const rc = getCellRC(focused as HTMLElement);
+  if (!rc) return null;
+
+  const from = parseInt(container.dataset.from!, 10);
+  const colCount = parseInt(container.dataset.colCount!, 10);
+  const rowCount = parseInt(container.dataset.rowCount!, 10);
+  const block = parseTablesInDoc(view.state).find(b => b.from === from) ?? null;
+
+  if (!block) return null;
+
+  return { ...rc, from, colCount, rowCount, block };
+}
+
+// 特定のセルにフォーカスを移動
+function focusCell(view: EditorView, from: number, row: number | null, col: number) {
+  const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
+  if (!container) return;
+
+  let target: HTMLElement | null = null;
+  if (row == null || row < 0) {
+    // header
+    target = container.querySelector(`thead tr > :nth-child(${col + 1})`) as HTMLElement | null;
+  } else {
+    // body
+    const tr = container.querySelector(`tbody tr:nth-child(${row + 1})`) as HTMLElement | null;
+    if (tr) target = tr.children[col] as HTMLElement | null;
+  }
+  
+  if (target) {
+    target.focus();
+    // カーソルを末尾に
+    try {
+      if (target.firstChild instanceof Text) {
+        const s = window.getSelection();
+        const r = document.createRange();
+        r.selectNodeContents(target);
+        r.collapse(false);
+        s?.removeAllRanges();
+        s?.addRange(r);
+      }
+    } catch { /* noop */ }
+  }
+}
+
+// Enter: フォーカスが外れるので、キーマップが拾う
 function cmdEnter(view: EditorView): boolean {
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
@@ -302,10 +592,117 @@ function cmdEnter(view: EditorView): boolean {
     focusCell(view, from, rowCount, col);
     return true;
   } else {
+    // 次の行にフォーカス
     focusCell(view, from, nRow, col);
     return true;
   }
 }
 
-// ... (moveHorizontal, moveVertical, copySelectionTSV は変更なし) ...
-// ... (tableKeymap, tableExtension は変更なし) ...
+// Tab: 次のセル
+function cmdTab(view: EditorView): boolean {
+  const ctx = getActiveCellContext(view);
+  if (!ctx) return false;
+  const { from, row, col, rowCount, colCount } = ctx;
+
+  let nRow = row ?? -1;
+  let nCol = col + 1;
+  if (nCol >= colCount) {
+    nCol = 0;
+    nRow += 1;
+  }
+  
+  if (nRow >= rowCount) {
+    // TODO: 最終セルならテーブルを抜ける？
+    return false; // keymap が false を返すとデフォルトの Tab 動作
+  }
+  
+  focusCell(view, from, nRow < 0 ? null : nRow, nCol);
+  return true;
+}
+
+// Shift+Tab: 前のセル
+function cmdShiftTab(view: EditorView): boolean {
+  const ctx = getActiveCellContext(view);
+  if (!ctx) return false;
+  const { from, row, col, rowCount, colCount } = ctx;
+  
+  let nRow = row ?? -1;
+  let nCol = col - 1;
+  if (nCol < 0) {
+    nCol = colCount - 1;
+    nRow -= 1;
+  }
+  
+  if (nRow < -1) {
+    return false; // 最初のセル
+  }
+  
+  focusCell(view, from, nRow < 0 ? null : nRow, nCol);
+  return true;
+}
+
+// 左右移動
+function moveHorizontal(dir: 'left' | 'right') {
+  return (view: EditorView): boolean => {
+    const ctx = getActiveCellContext(view);
+    if (!ctx) return false;
+
+    // TODO: カーソル位置が端かチェック
+    // 今は即座にセルを移動
+    
+    const { from, row, col, colCount } = ctx;
+    const nCol = clamp(col + (dir === 'left' ? -1 : 1), 0, colCount - 1);
+    if (nCol === col) return false; // 端だった
+    
+    focusCell(view, from, row, nCol);
+    return true;
+  };
+}
+
+// 上下移動
+function moveVertical(dir: 'up' | 'down') {
+  return (view: EditorView): boolean => {
+    const ctx = getActiveCellContext(view);
+    if (!ctx) return false;
+    
+    const { from, row, col, rowCount } = ctx;
+    let nRow: number | null = row ?? -1; // -1 = header
+    
+    if (dir === 'up') {
+      if (nRow === 0) nRow = null; // 1行目 -> ヘッダー
+      else if (nRow > 0) nRow = nRow - 1; // 2行目以降
+      else return false; // ヘッダー (null) より上には行けない
+    } else {
+      if (nRow === null) nRow = 0; // ヘッダー -> 1行目
+      else if (nRow < rowCount - 1) nRow = nRow + 1; // 最終行より前
+      else return false; // 最終行
+    }
+    
+    focusCell(view, from, nRow, col);
+    return true;
+  };
+}
+
+// TSV でコピー
+function copySelectionTSV(view: EditorView): boolean {
+  // TODO: 矩形選択した範囲を TSV でクリップボードにコピー
+  return false;
+}
+
+const tableKeymap = keymap.of([
+  { key: 'ArrowLeft', run: moveHorizontal('left') },
+  { key: 'ArrowRight', run: moveHorizontal('right') },
+  { key: 'ArrowUp', run: moveVertical('up') },
+  { key: 'ArrowDown', run: moveVertical('down') },
+  { key: 'Enter', run: cmdEnter },
+  { key: 'Tab', run: cmdTab },
+  { key: 'Shift-Tab', run: cmdShiftTab },
+  { key: 'Mod-c', run: copySelectionTSV },
+]);
+
+// ★★★ エラーの原因だった export ★★★
+export const tableExtension = [
+  Prec.high(tableKeymap),
+  tableDecoField,
+  // EditorView.decorations.of((view) => view.state.field(tableDecoField)), // StateField.provide で提供
+];
