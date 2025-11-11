@@ -159,7 +159,7 @@ class TableWidget extends WidgetType {
     return true;
   }
 
-  // ★★★ここから下をアロー関数 (=) 形式に変更★★★
+  // ★★★ アロー関数 (=) 形式 ★★★
 
   private dispatchReplace = (view: EditorView, updated: TableBlock, after?: () => void) => {
     const newText = serializeTable(updated);
@@ -365,10 +365,8 @@ class TableWidget extends WidgetType {
 
     el.addEventListener('input', () => {
       // input イベントは即時コミットしない（重すぎるため）
-      // commit() 
     });
     
-    // ★★★ keydown リスナーを修正 ★★★
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault(); // デフォルトの Enter (改行) を防ぐ
@@ -380,17 +378,13 @@ class TableWidget extends WidgetType {
       // 矢印キーやTabキーが押されたとき、
       // セルの内容をコミット（保存）する
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
-         commit();
-         // preventDefault はしない (キーマップに任せる)
+          commit();
+          // preventDefault はしない (キーマップに任せる)
       }
     });
 
-    // 矩形選択 (アロー関数なので 'this' はOK)
     el.addEventListener('mousedown', (e) => {
       // mousedown でフォーカスを当てる
-      // ただし、デフォルトのフォーカス処理に任せるとカーソル位置が先頭になる場合がある
-      // e.preventDefault(); // これをすると focus が当たらなくなる
-      // el.focus();
     });
 
     // 右クリックメニュー (アロー関数なので 'this' はOK)
@@ -486,9 +480,11 @@ class TableWidget extends WidgetType {
 
 // ---- Decorations ----
 
-function buildDecorations(view: EditorView): DecorationSet {
+// ★★★ 修正: (view: EditorView) から (state: EditorState) に変更 ★★★
+function buildDecorations(state: EditorState): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
-  const blocks = parseTablesInDoc(view.state);
+  // ★★★ 修正: view.state ではなく state を渡す ★★★
+  const blocks = parseTablesInDoc(state);
 
   for (const block of blocks) {
     builder.add(
@@ -503,15 +499,16 @@ function buildDecorations(view: EditorView): DecorationSet {
   return builder.finish();
 }
 
-// ★★★ 修正: 'export' を追加 ★★★
+// ★★★ 修正: 'export' を追加 & 呼び出し方を修正 ★★★
 export const tableDecoField = StateField.define<DecorationSet>({
   create(state) {
-    return buildDecorations(new EditorView(state)); // view を初期化
+    // ★★★ 修正: new EditorView(state) ではなく state を渡す ★★★
+    return buildDecorations(state);
   },
   update(value, tr) {
     if (!tr.docChanged) return value;
-    // TODO: もっと効率的に
-    return buildDecorations(new EditorView(tr.state));
+    // ★★★ 修正: new EditorView(tr.state) ではなく tr.state を渡す ★★★
+    return buildDecorations(tr.state);
   },
   provide: (f) => EditorView.decorations.from(f)
 });
@@ -556,18 +553,21 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
   }
   
   if (target) {
-    target.focus();
-    // カーソルを末尾に
-    try {
-      if (target.firstChild instanceof Text) {
-        const s = window.getSelection();
-        const r = document.createRange();
-        r.selectNodeContents(target);
-        r.collapse(false);
-        s?.removeAllRanges();
-        s?.addRange(r);
-      }
-    } catch { /* noop */ }
+    // ★ 安定化のため setTimeout を追加
+    setTimeout(() => {
+        target?.focus();
+        // カーソルを末尾に
+        try {
+          if (target && target.firstChild instanceof Text) {
+            const s = window.getSelection();
+            const r = document.createRange();
+            r.selectNodeContents(target);
+            r.collapse(false);
+            s?.removeAllRanges();
+            s?.addRange(r);
+          }
+        } catch { /* noop */ }
+    }, 0);
   }
 }
 
@@ -590,7 +590,8 @@ function cmdEnter(view: EditorView): boolean {
     const updated: TableBlock = { ...currentBlock, rows: [...currentBlock.rows, newRow] }; // ★ currentBlock を使用
     const newText = serializeTable(updated);
     view.dispatch({ changes: { from: currentBlock.from, to: currentBlock.to, insert: newText } }); // ★ currentBlock を使用
-    focusCell(view, from, rowCount, col);
+    // ★ 修正: dispatch が完了した後にフォーカス
+    setTimeout(() => focusCell(view, from, rowCount, col), 0);
     return true;
   } else {
     // 次の行にフォーカス
@@ -690,7 +691,7 @@ function copySelectionTSV(view: EditorView): boolean {
   return false;
 }
 
-// ★★★ 修正: 'export' を追加 ★★★
+// ★★★ 'export' を追加 ★★★
 export const tableKeymap = keymap.of([
   { key: 'ArrowLeft', run: moveHorizontal('left') },
   { key: 'ArrowRight', run: moveHorizontal('right') },
@@ -702,7 +703,7 @@ export const tableKeymap = keymap.of([
   { key: 'Mod-c', run: copySelectionTSV },
 ]);
 
-// ★★★ 修正: tableDecoField のみを含むように変更 ★★★
+// ★★★ tableDecoField のみを含むように変更 ★★★
 export const tableExtension = [
   tableDecoField,
 ];
