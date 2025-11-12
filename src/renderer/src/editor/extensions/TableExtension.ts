@@ -16,6 +16,9 @@ import {
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
+// ---- デバッグ用プレフィックス ----
+const logPrefix = '[TableExt]';
+
 // ---- Types and Helpers ----
 
 type Align = 'left' | 'right' | 'center' | null;
@@ -28,7 +31,7 @@ interface TableBlock {
   rows: string[][];
 }
 
-// (中略: serializeTable, parseTablesInDoc, getTableWidgetContainer, getCellRC, clamp は v7 から変更なし)
+// (中略: serializeTable は v9 から変更なし)
 function serializeTable(block: TableBlock): string {
   const colCount = Math.max(block.headers.length, ...block.rows.map(r => r.length));
   const headers = Array.from({ length: colCount }, (_, i) => block.headers[i] ?? '');
@@ -50,12 +53,15 @@ function serializeTable(block: TableBlock): string {
   });
   return lines.join('\n');
 }
+
 function parseTablesInDoc(state: EditorState): TableBlock[] {
+  console.log(`${logPrefix} parseTablesInDoc()`);
   const blocks: TableBlock[] = [];
   const tree = syntaxTree(state);
   tree.iterate({
     enter: (node) => {
       if (node.name !== 'Table') return;
+      // (中略: v9 から変更なし)
       const from = node.from;
       const to = node.to;
       const headers: string[] = [];
@@ -63,7 +69,7 @@ function parseTablesInDoc(state: EditorState): TableBlock[] {
       const rows: string[][] = [];
       let stateLoop: 'header' | 'align' | 'row' = 'header';
       for (let child = node.node.firstChild; child; child = child.nextSibling) {
-        const lineText = state.doc.sliceString(child.from, child.to); // v5 修正済み
+        const lineText = state.doc.sliceString(child.from, child.to); 
         if (child.name === 'TableHeader') {
           const parts = lineText.split('|').map(s => s.trim());
           if (parts[0] === '') parts.shift();
@@ -93,6 +99,7 @@ function parseTablesInDoc(state: EditorState): TableBlock[] {
       blocks.push({ from, to, headers, aligns, rows });
     }
   });
+  console.log(`${logPrefix} parseTablesInDoc: ${blocks.length} tables found.`);
   return blocks;
 }
 function getTableWidgetContainer(el: HTMLElement | null): HTMLElement | null {
@@ -118,100 +125,109 @@ class TableWidget extends WidgetType {
   
   constructor(private block: TableBlock) {
     super();
+    console.log(`${logPrefix} new TableWidget() [from: ${block.from}, to: ${block.to}]`);
   }
 
   eq(other: WidgetType): boolean {
-    if (!(other instanceof TableWidget)) return false;
-    if (other.block.from !== this.block.from ||
-        other.block.to !== this.block.to ||
-        other.block.headers.join('|') !== this.block.headers.join('|') ||
-        other.block.rows.map(r => r.join('|')).join('||') !== this.block.rows.map(r => r.join('|')).join('||')
-    ) return false;
-    return true;
+    const eq = (o: TableWidget) => {
+       if (o.block.from !== this.block.from ||
+           o.block.to !== this.block.to ||
+           o.block.headers.join('|') !== this.block.headers.join('|') ||
+           o.block.rows.map(r => r.join('|')).join('||') !== this.block.rows.map(r => r.join('|')).join('||')
+       ) return false;
+       return true;
+    }
+    const result = (other instanceof TableWidget) && eq(other);
+    console.log(`${logPrefix} eq(): ${result}`);
+    return result;
   }
 
   ignoreEvent(event: Event): boolean {
-    if (event.type === 'keydown' || event.type === 'keyup') return false; // キー操作はキーマップに流す
-    return true; // 他のイベント (click, input...) はウィジェット内で止める
+    const ignored = event.type !== 'keydown' && event.type !== 'keyup';
+    console.log(`${logPrefix} ignoreEvent(${event.type}): ${ignored}`);
+    return ignored;
   }
 
-  // ★★★ 修正 (v8): dispatchReplace を v7 から修正 ★★★
-  private dispatchReplace = (view: EditorView, updated: TableBlock, after?: () => void) => {
-    // ★ 1. dispatch を非同期にし、「Update Error」を防ぐ
+  private dispatchReplace = (view: EditorView, updated: TableBlock, after?: (latestFrom?: number) => void) => {
+    console.log(`${logPrefix} dispatchReplace() CALLED`);
     setTimeout(() => {
-      // ★ 2. v7 の view.posAtDOM(this.container) を廃止
-      //    代わりに、ウィジェット作成時の `from` (this.block.from) をキーにする
       const initialFrom = this.block.from;
-
-      // ★ 3. 最新の EditorState から、その `initialFrom` に *今ある* ブロックを再パース
+      console.log(`${logPrefix} dispatchReplace(async): Searching block at initialFrom: ${initialFrom}`);
+      
       const latestBlock = parseTablesInDoc(view.state).find(b => b.from === initialFrom);
       if (!latestBlock) {
-           console.error(`TableWidget: ${initialFrom} に最新のブロックが見つかりません。`);
-           // (v7) `this.container` がDOMツリーから切り離されると `view.posAtDOM` が失敗したが、
-           // `this.block.from` をキーにすれば、DOMの状態に関わらず `view.state` から検索できるはず
+           console.error(`${logPrefix} dispatchReplace(async): Block not found at ${initialFrom}!`);
            return;
       }
-
-      // ★ 4. 「変更内容 (updated)」から新しいテキストを生成
-      //    （from/to は念のため最新のものをセット）
-      const newText = serializeTable({ ...updated, from: latestBlock.from, to: latestBlock.to });
       
-      // ★ 5. *最新の* `from` と `to` を使ってトランザクションを作成
+      console.log(`${logPrefix} dispatchReplace(async): Block found [from: ${latestBlock.from}, to: ${latestBlock.to}]`);
+      const newText = serializeTable({ ...updated, from: latestBlock.from, to: latestBlock.to });
       const tr: TransactionSpec = {
         changes: { from: latestBlock.from, to: latestBlock.to, insert: newText }
       };
       
-      // ★ 6. dispatch を実行
+      console.log(`${logPrefix} dispatchReplace(async): DISPATCHING...`);
       view.dispatch(tr);
+      console.log(`${logPrefix} dispatchReplace(async): DISPATCHED`);
       
       if (after) {
-          // dispatch が完了した後に実行 (focusCellAt など)
-          // ★ 7. focusCellAt に渡す `from` も、*最新の* from (latestBlock.from) を使う
+          console.log(`${logPrefix} dispatchReplace(async): Calling 'after' callback...`);
           after(latestBlock.from);
       }
-    }, 0); // dispatch 全体を非同期化
+    }, 0); 
   }
 
-  // ★★★ 修正 (v8): after コールバックが `latestFrom` を受け取れるように変更 ★★★
   private focusCellAt = (view: EditorView, from: number, row: number | null, col: number) => {
+    console.log(`${logPrefix} focusCellAt(from: ${from}, row: ${row}, col: ${col})`);
     try {
       const tryFocus = () => {
-        // ★ `from` (data-from) を使ってコンテナを検索 (これは v7 と同じ)
+        console.log(`${logPrefix} focusCellAt(async): Trying to focus...`);
         const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
-        if (!container) return;
+        if (!container) {
+          console.warn(`${logPrefix} focusCellAt(async): Container [data-from="${from}"] not found.`);
+          return;
+        }
         let target: HTMLElement | null = null;
         if (row == null || row < 0) {
-          const th = container.querySelector(`thead tr > :nth-child(${col + 1})`) as HTMLElement | null;
-          target = th;
+          target = container.querySelector(`thead tr > :nth-child(${col + 1})`) as HTMLElement | null;
         } else {
           const tr = container.querySelector(`tbody tr:nth-child(${row + 1})`) as HTMLElement | null;
           if (tr) target = tr.children[col] as HTMLElement | null;
         }
-        target?.focus();
-        if (target && target.firstChild instanceof Text) {
-          const s = window.getSelection();
-          const r = document.createRange();
-          r.selectNodeContents(target);
-          r.collapse(false);
-          s?.removeAllRanges();
-          s?.addRange(r);
+        
+        if (target) {
+          console.log(`${logPrefix} focusCellAt(async): Target found, calling .focus()`);
+          target.focus();
+          // (中略: カーソル位置の制御)
+          if (target.firstChild instanceof Text) {
+            const s = window.getSelection();
+            const r = document.createRange();
+            r.selectNodeContents(target);
+            r.collapse(false);
+            s?.removeAllRanges();
+            s?.addRange(r);
+          }
+        } else {
+          console.warn(`${logPrefix} focusCellAt(async): Target cell (row: ${row}, col: ${col}) not found.`);
         }
       };
       setTimeout(tryFocus, 0);
-    } catch {
-      /* noop */
+    } catch (e) {
+      console.error(`${logPrefix} focusCellAt: Error`, e);
     }
   }
 
   private getBlockAtFrom = (state: EditorState, from: number): TableBlock | null => {
-    // ★ 常に最新の state からパースする (これは v7 と同じ)
+    console.log(`${logPrefix} getBlockAtFrom(from: ${from})`);
     const blocks = parseTablesInDoc(state);
-    return blocks.find(b => b.from === from) ?? null;
+    const block = blocks.find(b => b.from === from) ?? null;
+    if (!block) console.warn(`${logPrefix} getBlockAtFrom: Block not found at ${from}`);
+    return block;
   }
 
   // ---- Row/Col ops ----
-  // ★★★ 修正 (v8): `after` コールバックが `latestFrom` を受け取るように修正 ★★★
   private insertRow = (view: EditorView, container: HTMLElement, col: number, row: number, where: 'above' | 'below') => {
+    console.log(`${logPrefix} insertRow(row: ${row}, where: ${where})`);
     const from = parseInt(container.dataset.from!, 10);
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     const colCount = Math.max(block.headers.length, ...block.rows.map(r => r.length));
@@ -219,12 +235,10 @@ class TableWidget extends WidgetType {
     const newRows = block.rows.slice();
     newRows.splice(at, 0, Array(colCount).fill(''));
     const updated: TableBlock = { ...block, rows: newRows };
-    
-    // ★ `after` (フォーカス処理) が、dispatchReplace から渡される `latestFrom` を使う
     this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, at, col));
   }
-
   private deleteRow = (view: EditorView, container: HTMLElement, row: number) => {
+    console.log(`${logPrefix} deleteRow(row: ${row})`);
     const from = parseInt(container.dataset.from!, 10);
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     if (block.rows.length === 0) return;
@@ -234,8 +248,8 @@ class TableWidget extends WidgetType {
     const updated: TableBlock = { ...block, rows: newRows };
     this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, focusRow, 0));
   }
-
   private insertCol = (view: EditorView, container: HTMLElement, col: number, where: 'left' | 'right') => {
+    console.log(`${logPrefix} insertCol(col: ${col}, where: ${where})`);
     const from = parseInt(container.dataset.from!, 10);
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     const at = where === 'left' ? col : col + 1;
@@ -251,8 +265,8 @@ class TableWidget extends WidgetType {
     const updated: TableBlock = { ...block, headers, aligns, rows };
     this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, 0, at));
   }
-
   private deleteCol = (view: EditorView, container: HTMLElement, col: number) => {
+    console.log(`${logPrefix} deleteCol(col: ${col})`);
     const from = parseInt(container.dataset.from!, 10);
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     const headers = block.headers.slice();
@@ -270,10 +284,11 @@ class TableWidget extends WidgetType {
     this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, 0, newCol));
   }
 
-  // (中略: showContextMenu, mkItem, closeOnOutside は v7 から変更なし)
   private showContextMenu = (view: EditorView, container: HTMLElement, rc: { row: number | null; col: number }, x: number, y: number) => {
+    console.log(`${logPrefix} showContextMenu(row: ${rc.row}, col: ${rc.col})`);
     container.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
     const menu = document.createElement('div');
+    // (中略: メニューのスタイルと作成処理は v9 から変更なし)
     menu.className = 'cm-table-menu';
     menu.style.position = 'fixed';
     menu.style.left = `${x}px`;
@@ -294,6 +309,7 @@ class TableWidget extends WidgetType {
       it.textContent = label;
       if (enabled) {
         it.addEventListener('click', (e) => {
+          console.log(`${logPrefix} Menu item click: ${label}`);
           e.stopPropagation();
           e.preventDefault();
           cb();
@@ -306,6 +322,7 @@ class TableWidget extends WidgetType {
     };
     const closeOnOutside = (e: MouseEvent) => {
       if (!menu.contains(e.target as Node)) {
+        console.log(`${logPrefix} Closing context menu (click outside)`);
         menu.remove();
         document.removeEventListener('click', closeOnOutside);
       }
@@ -336,6 +353,7 @@ class TableWidget extends WidgetType {
     updateValue: (val: string) => void,
     view: EditorView
   ) => {
+    console.log(`${logPrefix} buildCell(tag: ${tag}, row: ${row}, col: ${col})`);
     const el = document.createElement(tag);
     el.contentEditable = 'true';
     el.textContent = text;
@@ -348,44 +366,63 @@ class TableWidget extends WidgetType {
     el.style.outline = 'none';
 
     el.addEventListener('focus', () => {
+      console.log(`${logPrefix} FOCUS (row: ${row}, col: ${col})`);
       el.style.boxShadow = 'inset 0 0 0 2px #007bff';
     });
     
     const extractValue = () => (el.textContent ?? '').replace(/\r?\n/g, ' ');
-    const commit = () => updateValue(extractValue());
+    const commit = () => {
+      console.log(`${logPrefix} commit() CALLED (row: ${row}, col: ${col})`);
+      updateValue(extractValue());
+    }
     
-    el.addEventListener('blur', () => {
+    // ★★★ 修正 (v10): "賢い" blur リスナー ★★★
+    el.addEventListener('blur', (e: FocusEvent) => {
       el.style.boxShadow = 'none';
-      commit(); // ★ blur 時にコミット (v8 の dispatchReplace で安全になったはず)
+      
+      const relatedTarget = e.relatedTarget as HTMLElement | null;
+      // this.container は toDOM で設定される
+      const container = this.container; 
+
+      if (container && relatedTarget && container.contains(relatedTarget)) {
+        // フォーカスがテーブル内の別のセルに移動しただけ (e.g. 矢印キー)
+        // この場合はコミット（再描画）をスキップする
+        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (focus moved to another cell)`);
+      } else {
+        // フォーカスがテーブル外に移動した、または不明
+        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Committing (focus left table or lost)`);
+        commit(); // ★ 変更をコミット
+      }
     });
 
     el.addEventListener('input', () => {
       // noop
     });
     
-    // ★★★ 修正 (v8): キー操作 (矢印, Tab) がキーマップに渡るように修正 ★★★
+    // (v9 の keydown リスナー: 矢印キーでは commit しない)
     el.addEventListener('keydown', (e) => {
+      console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key}`);
       if (e.key === 'Enter') {
-        e.preventDefault(); // Enter (改行) は防ぐ
-        commit(); 
-        (el as HTMLElement).blur(); // ★フォーカスを外し、キーマップ(cmdEnter)が起動できるようにする
+        e.preventDefault(); 
+        console.log(`${logPrefix} KEYDOWN: Enter. Committing and blurring...`);
+        commit(); // Enter 時はコミット
+        (el as HTMLElement).blur(); // キーマップ(cmdEnter)を起動
         return;
       }
 
-      // ★ 矢印キーやTabキーが押されたとき、
-      //    キーイベントを妨害 (preventDefault) せず、キーマップに渡るようにする
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
-          commit(); // ★ただし、内容はコミット（保存）だけする
-          // preventDefault() や blur() はしない！
+          // (v9) 矢印キーでは commit() を呼ばない
+          console.log(`${logPrefix} KEYDOWN: Arrow/Tab. Passing event to keymap.`);
       }
     });
 
     el.addEventListener('mousedown', (e) => {
-      // noop
+      console.log(`${logPrefix} mousedown (row: ${row}, col: ${col})`);
     });
 
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      console.log(`${logPrefix} contextmenu (row: ${row}, col: ${col})`);
       const container = getTableWidgetContainer(el);
       if (!container) return;
       const rc = getCellRC(el);
@@ -398,6 +435,7 @@ class TableWidget extends WidgetType {
 
   // ★ toDOM はアロー関数 ( = ) に *しない*
   toDOM(view: EditorView): HTMLElement {
+    console.log(`${logPrefix} toDOM() [from: ${this.block.from}]`);
     const container = document.createElement('div');
     this.container = container; // v7 から
     
@@ -430,14 +468,14 @@ class TableWidget extends WidgetType {
 
     headers.forEach((text, col) => {
       const th = this.buildCell('th', text, col, null, aligns[col] ?? null, (val) => {
-        // ★ getBlockAtFrom で最新の block を取得 (v7 から)
+        // (v8 の updateValue コールバック)
+        console.log(`${logPrefix} updateValue (Header col: ${col}): '${val}'`);
         const currentBlock = this.getBlockAtFrom(view.state, this.block.from) ?? this.block;
         const updated: TableBlock = {
           ...currentBlock,
           headers: headers.map((h, i) => (i === col ? val : h)),
           aligns
         };
-        // ★ v8 の dispatchReplace を呼ぶ
         this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? this.block.from, null, col));
       }, view);
       trh.appendChild(th);
@@ -449,13 +487,13 @@ class TableWidget extends WidgetType {
       const tr = document.createElement('tr');
       for (let c = 0; c < colCount; c++) {
         const td = this.buildCell('td', row[c] ?? '', c, rIdx, aligns[c] ?? null, (val) => {
-          // ★ getBlockAtFrom で最新の block を取得 (v7 から)
+          // (v8 の updateValue コールバック)
+          console.log(`${logPrefix} updateValue (Body row: ${rIdx}, col: ${c}): '${val}'`);
           const currentBlock = this.getBlockAtFrom(view.state, this.block.from) ?? this.block;
           const newRows = currentBlock.rows.map((r, i) => (i === rIdx ? [...r] : r.slice()));
           if (!newRows[rIdx]) newRows[rIdx] = Array(colCount).fill('');
           newRows[rIdx][c] = val;
           const updated: TableBlock = { ...currentBlock, rows: newRows };
-          // ★ v8 の dispatchReplace を呼ぶ
           this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? this.block.from, rIdx, c));
         }, view);
         tr.appendChild(td);
@@ -482,8 +520,8 @@ class TableWidget extends WidgetType {
 
 // ---- Decorations ----
 
-// (中略: buildDecorations, tableDecoField は v7 から変更なし)
 function buildDecorations(state: EditorState): DecorationSet {
+  console.log(`${logPrefix} buildDecorations()`);
   const builder = new RangeSetBuilder<Decoration>();
   const blocks = parseTablesInDoc(state);
   for (const block of blocks) {
@@ -497,12 +535,16 @@ function buildDecorations(state: EditorState): DecorationSet {
   }
   return builder.finish();
 }
+
 export const tableDecoField = StateField.define<DecorationSet>({
   create(state) {
+    console.log(`${logPrefix} tableDecoField.create()`);
     return buildDecorations(state);
   },
   update(value, tr) {
+    console.log(`${logPrefix} tableDecoField.update()`);
     if (!tr.docChanged) return value;
+    console.log(`${logPrefix} tableDecoField.update(): doc changed, rebuilding decorations.`);
     return buildDecorations(tr.state);
   },
   provide: (f) => EditorView.decorations.from(f)
@@ -510,28 +552,43 @@ export const tableDecoField = StateField.define<DecorationSet>({
 
 // ---- Keymap ----
 
-// (中略: getActiveCellContext は v7 から変更なし)
 function getActiveCellContext(view: EditorView) {
+  console.log(`${logPrefix} getActiveCellContext()`);
   const sel = view.state.selection.main;
   const focused = view.hasFocus ? document.activeElement : null;
-  if (!focused || (focused.tagName !== 'TH' && focused.tagName !== 'TD')) return null;
+  if (!focused || (focused.tagName !== 'TH' && focused.tagName !== 'TD')) {
+    console.log(`${logPrefix} getActiveCellContext: FAILED (No cell focused)`);
+    return null;
+  }
   const container = getTableWidgetContainer(focused as HTMLElement);
-  if (!container) return null;
+  if (!container) {
+    console.log(`${logPrefix} getActiveCellContext: FAILED (No container found)`);
+    return null;
+  }
   const rc = getCellRC(focused as HTMLElement);
-  if (!rc) return null;
+  if (!rc) {
+    console.log(`${logPrefix} getActiveCellContext: FAILED (No RC found)`);
+    return null;
+  }
   const from = parseInt(container.dataset.from!, 10);
   const colCount = parseInt(container.dataset.colCount!, 10);
   const rowCount = parseInt(container.dataset.rowCount!, 10);
-  // ★ キーマップが呼ばれる瞬間も、最新の state から block を取得する
   const block = parseTablesInDoc(view.state).find(b => b.from === from) ?? null;
-  if (!block) return null;
+  if (!block) {
+    console.log(`${logPrefix} getActiveCellContext: FAILED (No block found at ${from})`);
+    return null;
+  }
+  console.log(`${logPrefix} getActiveCellContext: SUCCESS (row: ${rc.row}, col: ${rc.col})`);
   return { ...rc, from, colCount, rowCount, block };
 }
 
-// (中略: focusCell は v7 から変更なし)
 function focusCell(view: EditorView, from: number, row: number | null, col: number) {
+  console.log(`${logPrefix} focusCell(from: ${from}, row: ${row}, col: ${col})`);
   const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
-  if (!container) return;
+  if (!container) {
+    console.warn(`${logPrefix} focusCell: Container [data-from="${from}"] not found.`);
+    return;
+  }
   let target: HTMLElement | null = null;
   if (row == null || row < 0) {
     target = container.querySelector(`thead tr > :nth-child(${col + 1})`) as HTMLElement | null;
@@ -541,8 +598,10 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
   }
   if (target) {
     setTimeout(() => {
+        console.log(`${logPrefix} focusCell(async): Calling .focus() on target...`);
         target?.focus();
         try {
+          // (中略: カーソル位置の制御)
           if (target && target.firstChild instanceof Text) {
             const s = window.getSelection();
             const r = document.createRange();
@@ -553,16 +612,20 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
           }
         } catch { /* noop */ }
     }, 0);
+  } else {
+     console.warn(`${logPrefix} focusCell: Target cell (row: ${row}, col: ${col}) not found in container.`);
   }
 }
 
-// ★★★ 修正 (v8): cmdEnter の `from` の扱いを修正 ★★★
+// (v8 の cmdEnter: RangeError 対策済み)
 function cmdEnter(view: EditorView): boolean {
-  // ★ getActiveCellContext は、呼び出し時の最新の state から block を取得する (v8)
+  console.log(`${logPrefix} keymap: Enter`);
   const ctx = getActiveCellContext(view);
-  if (!ctx) return false;
+  if (!ctx) {
+     console.log(`${logPrefix} keymap: Enter FAILED (No active cell)`);
+     return false; // ★ Enterキーは一旦ここで止める (v10)
+  }
   
-  // ★ ctx.block は既に最新
   const currentBlock = ctx.block; 
   if (!currentBlock) return false;
 
@@ -571,34 +634,31 @@ function cmdEnter(view: EditorView): boolean {
   let nRow = curRow + 1;
 
   if (nRow >= rowCount) {
-    // 最終行 → 新規行追加
+    console.log(`${logPrefix} keymap: Enter (End of table) -> Add row (Not yet implemented as per request)`);
+    // (Enterキーでの行追加は、ご要望により、v9/v10 では *動作しないまま* にしています)
+    // (もし v8 の動作に戻す場合は、以下のコメントアウトを解除します)
+    /*
     const newRow = Array(colCount).fill('');
     const updated: TableBlock = { ...currentBlock, rows: [...currentBlock.rows, newRow] };
     const newText = serializeTable(updated);
-
-    // ★ dispatch を非同期に (v7 から)
     setTimeout(() => {
-        // ★ dispatch 時点での *最新の* ブロック範囲を再取得 (v7 から)
         const latestBlock = parseTablesInDoc(view.state).find(b => b.from === currentBlock.from);
         if (!latestBlock) return;
-        
         view.dispatch({ changes: { from: latestBlock.from, to: latestBlock.to, insert: newText } });
-        
-        // ★ dispatch 完了後にフォーカス (v8)
-        //    focusCell に渡す `from` は、最新の `latestBlock.from` を使う
         focusCell(view, latestBlock.from, rowCount, col);
     }, 0);
-    
-    return true;
+    */
+    return true; // イベントは処理した
   } else {
-    // 次の行にフォーカス
+    console.log(`${logPrefix} keymap: Enter -> Move to next row`);
     focusCell(view, from, nRow, col);
     return true;
   }
 }
 
-// (中略: Tab, Shift+Tab, 矢印キー移動 は v7 から変更なし)
+// (v8 の Tab, Shift+Tab, 矢印キー移動)
 function cmdTab(view: EditorView): boolean {
+  console.log(`${logPrefix} keymap: Tab`);
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
   const { from, row, col, rowCount, colCount } = ctx;
@@ -609,12 +669,14 @@ function cmdTab(view: EditorView): boolean {
     nRow += 1;
   }
   if (nRow >= rowCount) {
-    return false; 
+    console.log(`${logPrefix} keymap: Tab (End of table)`);
+    return false; // テーブルを抜ける
   }
   focusCell(view, from, nRow < 0 ? null : nRow, nCol);
   return true;
 }
 function cmdShiftTab(view: EditorView): boolean {
+  console.log(`${logPrefix} keymap: Shift-Tab`);
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
   const { from, row, col, rowCount, colCount } = ctx;
@@ -625,24 +687,30 @@ function cmdShiftTab(view: EditorView): boolean {
     nRow -= 1;
   }
   if (nRow < -1) {
-    return false; 
+    console.log(`${logPrefix} keymap: Shift-Tab (Start of table)`);
+    return false; // テーブルを抜ける
   }
   focusCell(view, from, nRow < 0 ? null : nRow, nCol);
   return true;
 }
 function moveHorizontal(dir: 'left' | 'right') {
   return (view: EditorView): boolean => {
+    console.log(`${logPrefix} keymap: Arrow ${dir}`);
     const ctx = getActiveCellContext(view);
     if (!ctx) return false;
     const { from, row, col, colCount } = ctx;
     const nCol = clamp(col + (dir === 'left' ? -1 : 1), 0, colCount - 1);
-    if (nCol === col) return false; 
+    if (nCol === col) {
+      console.log(`${logPrefix} keymap: Arrow ${dir} (At edge)`);
+      return false; // 端にいる
+    }
     focusCell(view, from, row, nCol);
     return true;
   };
 }
 function moveVertical(dir: 'up' | 'down') {
   return (view: EditorView): boolean => {
+    console.log(`${logPrefix} keymap: Arrow ${dir}`);
     const ctx = getActiveCellContext(view);
     if (!ctx) return false;
     const { from, row, col, rowCount } = ctx;
@@ -650,17 +718,24 @@ function moveVertical(dir: 'up' | 'down') {
     if (dir === 'up') {
       if (nRow === 0) nRow = null; 
       else if (nRow > 0) nRow = nRow - 1; 
-      else return false; 
+      else {
+        console.log(`${logPrefix} keymap: Arrow ${dir} (At edge)`);
+        return false; // ヘッダー
+      }
     } else {
       if (nRow === null) nRow = 0; 
       else if (nRow < rowCount - 1) nRow = nRow + 1; 
-      else return false; 
+      else {
+        console.log(`${logPrefix} keymap: Arrow ${dir} (At edge)`);
+        return false; // 最終行
+      }
     }
     focusCell(view, from, nRow, col);
     return true;
   };
 }
 function copySelectionTSV(view: EditorView): boolean {
+  console.log(`${logPrefix} keymap: Mod-c (Not implemented)`);
   return false;
 }
 
@@ -671,7 +746,7 @@ export const tableKeymap = keymap.of([
   { key: 'ArrowDown', run: moveVertical('down') },
   { key: 'Enter', run: cmdEnter },
   { key: 'Tab', run: cmdTab },
-  { key: 'Shift-Tab', run: cmdShiftTab }, // v6 修正済み
+  { key: 'Shift-Tab', run: cmdShiftTab }, 
   { key: 'Mod-c', run: copySelectionTSV },
 ]);
 
