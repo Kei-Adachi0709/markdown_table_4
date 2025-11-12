@@ -145,9 +145,9 @@ function clamp(val: number, min: number, max: number) {
 // ---- Widget ----
 class TableWidget extends WidgetType {
   private container: HTMLElement | null = null;
-  // (v12) 右クリックメニューフラグ
+  // (v14) 右クリックメニューフラグ
   private isOpeningContextMenu = false;
-  // ★ (v16) プログラムによるフォーカス移動中フラグ
+  // (v16) プログラムによるフォーカス移動中フラグ
   private isProgrammaticFocus = false;
   
   constructor(private block: TableBlock) {
@@ -218,8 +218,7 @@ class TableWidget extends WidgetType {
     }, 0); 
   }
 
-  // (v8 の focusCellAt)
-  // ★ (v16) プログラムによるフォーカスフラグをセットする
+  // (v16 の focusCellAt)
   private focusCellAt = (view: EditorView, from: number, row: number | null, col: number) => {
     console.log(`${logPrefix} focusCellAt(from: ${from}, row: ${row}, col: ${col})`);
     try {
@@ -278,8 +277,7 @@ class TableWidget extends WidgetType {
   }
 
   // ---- Row/Col ops ----
-  // (v8 の Row/Col 操作: RangeError 対策済み)
-  // (v15 の insertCol 修正: row を受け取る)
+  // (v15 の Row/Col 操作)
   private insertRow = (view: EditorView, container: HTMLElement, col: number, row: number, where: 'above' | 'below') => {
     console.log(`${logPrefix} insertRow(row: ${row}, where: ${where})`);
     const from = parseInt(container.dataset.from!, 10);
@@ -289,7 +287,6 @@ class TableWidget extends WidgetType {
     const newRows = block.rows.slice();
     newRows.splice(at, 0, Array(colCount).fill(''));
     const updated: TableBlock = { ...block, rows: newRows };
-    // (v8) after に (latestFrom) => ... を渡す
     this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, at, col));
   }
   private deleteRow = (view: EditorView, container: HTMLElement, row: number) => {
@@ -341,7 +338,7 @@ class TableWidget extends WidgetType {
     this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, 0, newCol));
   }
 
-  // (v10 の showContextMenu)
+  // (v14 の showContextMenu)
   private showContextMenu = (view: EditorView, container: HTMLElement, rc: { row: number | null; col: number }, x: number, y: number) => {
     console.log(`${logPrefix} showContextMenu(row: ${rc.row}, col: ${rc.col})`);
     // 古いメニューを削除
@@ -386,10 +383,11 @@ class TableWidget extends WidgetType {
       if (!menu.contains(e.target as Node)) {
         console.log(`${logPrefix} Closing context menu (click outside)`);
         menu.remove();
+        // (v14) フラグのリセットは mousedown / blur が行う
+        // this.isOpeningContextMenu = false; 
         document.removeEventListener('click', closeOnOutside);
       }
     };
-    // (v10) 外側クリックで閉じるリスナー
     setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
 
     const rowOpsEnabled = rc.row != null;
@@ -414,7 +412,7 @@ class TableWidget extends WidgetType {
     document.body.appendChild(menu);
   }
 
-  // ★★★ 修正 (v16): `focus`, `blur` リスナー ★★★
+  // ★★★ 修正 (v17): `focus`, `blur`, `keydown` リスナー ★★★
   private buildCell = (
     tag: 'th' | 'td',
     text: string,
@@ -496,14 +494,13 @@ class TableWidget extends WidgetType {
       // noop
     });
     
-    // (v9 の keydown リスナー: 矢印キーでは commit しない)
+    // ★ (v17) keydown リスナー: Enter では commit/blur しない
     el.addEventListener('keydown', (e) => {
       console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key}`);
       if (e.key === 'Enter') {
-        e.preventDefault(); 
-        console.log(`${logPrefix} KEYDOWN: Enter. Committing and blurring...`);
-        commit(); // Enter 時はコミット
-        (el as HTMLElement).blur(); // キーマップ(cmdEnter)を起動
+        e.preventDefault(); // ★ セル内改行を防ぐ
+        console.log(`${logPrefix} KEYDOWN: Enter. Passing event to keymap.`);
+        // ★ (v17) commit() と blur() を削除！ keymap に任せる
         return;
       }
       // (v9) 矢印キーやTabでは commit() しない（keymap に任せる）
@@ -704,7 +701,7 @@ function getActiveCellContext(view: EditorView) {
   }
   
   console.log(`${logPrefix} getActiveCellContext: SUCCESS (row: ${rc.row}, col: ${rc.col})`);
-  return { ...rc, from, colCount, rowCount, block };
+  return { ...rc, from, colCount, rowCount, block, el: focused as HTMLElement }; // ★ (v17) 'el' を追加
 }
 
 // (v10 の focusCell)
@@ -752,45 +749,80 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
   }
 }
 
-// (v11 の cmdEnter: 復活済み)
+// ★★★ 修正 (v17): Enter キーロジック ★★★
 function cmdEnter(view: EditorView): boolean {
   console.log(`${logPrefix} keymap: Enter`);
   const ctx = getActiveCellContext(view);
   if (!ctx) {
      console.log(`${logPrefix} keymap: Enter FAILED (No active cell)`);
-     return false;
+     return false; // セルがフォーカスされていない場合は、デフォルトの Enter 動作
   }
   
-  // (v8) ctx から最新の block を取得
-  const currentBlock = ctx.block; 
-  if (!currentBlock) return false; // (ありえないはず)
+  console.log(`${logPrefix} keymap: Enter -> Committing and moving/adding row.`);
+  
+  // (v17) 1. 現在のセルの値を取得 (DOMから)
+  const { from, row, col, rowCount, colCount, block: currentBlock, el } = ctx;
+  const val = (el.textContent ?? '').replace(/\r?\n/g, ' ');
+  
+  // (v17) 2. 保存すべきテーブル状態を作成
+  let updatedBlock: TableBlock;
+  if (row == null) { // ヘッダー
+    const headers = currentBlock.headers.map((h, i) => (i === col ? val : h));
+    updatedBlock = { ...currentBlock, headers };
+  } else { // ボディ
+    const newRows = currentBlock.rows.map((r, i) => (i === row ? [...r] : r.slice()));
+    if (!newRows[row]) newRows[row] = Array(colCount).fill('');
+    while(newRows[row].length < colCount) newRows[row].push('');
+    newRows[row][c] = val;
+    updatedBlock = { ...currentBlock, rows: newRows };
+  }
 
-  const { from, row, col, rowCount, colCount } = ctx;
+  // 3. ★ご要望の分岐★
   let curRow = row ?? -1;
   let nRow = curRow + 1;
 
-  if (nRow >= rowCount) {
+  if (nRow >= rowCount) { 
     // 最終行 → 新規行追加
     console.log(`${logPrefix} keymap: Enter (End of table) -> Add row`);
     const newRow = Array(colCount).fill('');
-    const updated: TableBlock = { ...currentBlock, rows: [...currentBlock.rows, newRow] };
-    const newText = serializeTable(updated);
+    // (v17) 保存すべき状態に、さらに新しい行を追加
+    updatedBlock = { ...updatedBlock, rows: [...updatedBlock.rows, newRow] };
     
-    // (v8) 非同期 dispatch
+    // (v17) dispatch (保存 + 行追加) と focus (新しい行) を実行
+    const newText = serializeTable(updatedBlock);
     setTimeout(() => {
-        // (v8) dispatch 直前に最新の block 範囲を *再取得*
         const latestBlock = parseTablesInDoc(view.state).find(b => b.from === currentBlock.from);
         if (!latestBlock) return;
         
         view.dispatch({ changes: { from: latestBlock.from, to: latestBlock.to, insert: newText } });
-        // (v8) 最新の from を使ってフォーカス
-        focusCell(view, latestBlock.from, rowCount, col);
+        // (v17) focusCellAt (Widget のメソッド) を呼んでフラグを立てる
+        const widget = view.plugin(tableDecoField)?.decorations.iter(latestBlock.from).value?.widget;
+        if (widget instanceof TableWidget) {
+          widget.focusCellAt(view, latestBlock.from, rowCount, col);
+        } else {
+          focusCell(view, latestBlock.from, rowCount, col); // フォールバック
+        }
     }, 0);
     return true;
-  } else {
-    // 次の行にフォーカス
+  } else { 
+    // 最後以外の行 → 次の行にフォーカス
     console.log(`${logPrefix} keymap: Enter -> Move to next row`);
-    focusCell(view, from, nRow, col);
+    
+    // (v17) dispatch (保存) と focus (次の行) を実行
+    const newText = serializeTable(updatedBlock);
+    setTimeout(() => {
+        const latestBlock = parseTablesInDoc(view.state).find(b => b.from === currentBlock.from);
+        if (!latestBlock) return;
+        
+        view.dispatch({ changes: { from: latestBlock.from, to: latestBlock.to, insert: newText } });
+        // (v17) focusCellAt (Widget のメソッド) を呼んでフラグを立てる
+         const widget = view.plugin(tableDecoField)?.decorations.iter(latestBlock.from).value?.widget;
+        if (widget instanceof TableWidget) {
+          widget.focusCellAt(view, latestBlock.from, nRow, col);
+        } else {
+          focusCell(view, latestBlock.from, nRow, col); // フォールバック
+        }
+    }, 0);
     return true;
   }
 }
