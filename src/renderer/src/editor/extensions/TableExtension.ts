@@ -138,7 +138,11 @@ function getCellRC(el: HTMLElement | null): { row: number | null; col: number } 
   // (v19) <tbody> がない場合 (toDOM が thead の次に行を追加した場合) も考慮
   const tbody = rowEl.closest('tbody');
   if (tbody) {
-      return { row: rowEl.rowIndex - 1, col }; // <tbody> の <tr> は rowIndex が 1 から始まる (thead があれば)
+      // <tbody> があり、その中に <tr> がある場合
+      // rowEl.rowIndex は <thead> の行数を考慮したインデックス (e.g., thead 1行なら 1 から始まる)
+      // <thead> が 1行 の場合、<tbody> の 1行目 (row: 0) は rowIndex: 1
+      const theadRowCount = tbody.parentElement?.querySelector('thead')?.rows.length ?? 0;
+      return { row: rowEl.rowIndex - theadRowCount, col };
   }
   // (v19) thead の直後の tr の場合 (tbody がない)
   if (rowEl.parentElement?.tagName === 'TABLE') {
@@ -160,6 +164,8 @@ class TableWidget extends WidgetType {
   private isOpeningContextMenu = false;
   // (v16) プログラムによるフォーカス移動中フラグ
   private isProgrammaticFocus = false;
+  // ★ (v23) キー操作またはマウス操作による意図的な blur かを判定するフラグ
+  private isIntentionalBlur = false;
   
   constructor(private block: TableBlock) {
     super();
@@ -272,7 +278,7 @@ class TableWidget extends WidgetType {
         }
       };
       // (v8) dispatch が非同期なので、フォーカスも非同期（DOM 更新後）
-      setTimeout(tryFocus, 0);
+      setTimeout(tryFocus, 50); // (v20) 0ms -> 50ms に延長し、DOM更新を待つ
     } catch (e) {
       console.error(`${logPrefix} focusCellAt: Error`, e);
     }
@@ -390,16 +396,23 @@ class TableWidget extends WidgetType {
       return it;
     };
 
+    // ★ (v23)
     const closeOnOutside = (e: MouseEvent) => {
       if (!menu.contains(e.target as Node)) {
         console.log(`${logPrefix} Closing context menu (click outside)`);
         menu.remove();
-        // (v14) フラグのリセットは mousedown / blur が行う
+        // ★ (v23) フラグのリセットは mousedown / focus が行う
         // this.isOpeningContextMenu = false; 
         document.removeEventListener('click', closeOnOutside);
+        document.removeEventListener('mousedown', closeOnOutside); // (v23) mousedown も監視
       }
     };
-    setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
+    // (v23) mousedown も監視
+    setTimeout(() => {
+        document.addEventListener('click', closeOnOutside);
+        document.addEventListener('mousedown', closeOnOutside);
+    }, 0);
+
 
     const rowOpsEnabled = rc.row != null;
     const colOpsEnabled = true;
@@ -423,7 +436,7 @@ class TableWidget extends WidgetType {
     document.body.appendChild(menu);
   }
 
-  // ★★★ 修正 (v19): `focus`, `blur`, `keydown` リスナー ★★★
+  // ★★★ 修正 (v23): `focus`, `blur`, `keydown`, `mousedown` リスナー ★★★
   private buildCell = (
     tag: 'th' | 'td',
     text: string,
@@ -445,24 +458,41 @@ class TableWidget extends WidgetType {
     el.style.position = 'relative'; 
     el.style.outline = 'none';
 
-    // ★ (v16) focus リスナー: プログラムフォーカスフラグをリセット
+    // ★ (v23) focus リスナー: すべてのフラグをリセット
     el.addEventListener('focus', () => {
       console.log(`${logPrefix} FOCUS (row: ${row}, col: ${col})`);
       el.style.boxShadow = 'inset 0 0 0 2px #007bff';
       
-      // ★ (v16) フォーカスを受け取ったので、フラグをリセット
+      // ★ (v23) セルがフォーカスを得たら、すべての「意図的blur」フラグをリセット
       this.isProgrammaticFocus = false;
+      this.isHandledKeyDown = false;
+      this.isOpeningContextMenu = false;
     });
     
     const extractValue = () => (el.textContent ?? '').replace(/\r?\n/g, ' ');
     const commit = () => {
+      // (v11) DOM に接続されていない（=再描画で破棄された）セルのコミットは防ぐ
+      if (!el.isConnected) {
+        console.log(`${logPrefix} commit() SKIPPED (row: ${row}, col: ${col}) - element disconnected`);
+        return;
+      }
       console.log(`${logPrefix} commit() CALLED (row: ${row}, col: ${col})`);
       updateValue(extractValue());
     }
     
-    // ★ (v16) blur リスナー: isProgrammaticFocus をチェック
+    // ★ (v23) blur リスナー: 3つのフラグをチェック
     el.addEventListener('blur', (e: FocusEvent) => {
+      console.log(`${logPrefix} BLUR (row: ${row}, col: ${col})`);
       el.style.boxShadow = 'none';
+
+      // ★ (v23) 最優先チェック: Enter/矢印/Tab/MouseDown が（直前に）発火していたら、
+      //    この blur はその結果なので、コミットをスキップする
+      if (this.isIntentionalBlur) {
+        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (blur was intentional)`);
+        // (v23) フラグは focus リスナーがリセットする
+        // this.isIntentionalBlur = false; 
+        return; 
+      }
 
       // ★ (v16) もし `focusCellAt` が（直前に）発火していたら、
       //    この blur はその結果なので、コミットをスキップする
@@ -476,26 +506,10 @@ class TableWidget extends WidgetType {
       //    この blur はメニューを開くためのものなので、コミットをスキップする
       if (this.isOpeningContextMenu) {
         console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (blur was from context menu)`);
-        // (v14) フラグをここでリセット
-        this.isOpeningContextMenu = false; 
+        // (v14 -> v21) フラグのリセットは focus / mousedown が行う
         return; 
       }
       
-      // (v10) フォーカスがテーブル内の別のセルに移動したかチェック
-      const relatedTarget = e.relatedTarget as HTMLElement | null;
-      const container = this.container; 
-
-      if (container && relatedTarget && container.contains(relatedTarget)) {
-        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (focus moved to another cell)`);
-        return; 
-      }
-      
-      // (v11) セルが DOM から切り離されていたらコミットしない
-      if (!el.isConnected) {
-        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (element is disconnected)`);
-        return; 
-      }
-
       // (v10) フォーカスがテーブル外に移動した、または不明
       console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Committing (focus left table or lost)`);
       commit(); 
@@ -505,15 +519,18 @@ class TableWidget extends WidgetType {
       // noop
     });
     
-    // ★★★ (v19) keydown リスナー: `index.html` のロジックを採用 ★★★
+    // ★★★ (v23) keydown リスナー: (v21のロジック + isIntentionalBlur) ★★★
     el.addEventListener('keydown', (e) => {
       console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key}`);
       
       if (e.key === 'Enter') {
         e.preventDefault(); // ★ セル内改行を防ぐ
-        console.log(`${logPrefix} KEYDOWN: Enter. Handling move/add row...`);
+        
+        // ★ (v23) これから blur が発生することをフラグで伝える
+        this.isIntentionalBlur = true;
+        
+        console.log(`${logPrefix} KEYDOWN: Enter. Handling move/add row (v21)...`);
 
-        // (v19) index.html と同様のロジックをここに実装
         const container = getTableWidgetContainer(el);
         if (!container) return;
         
@@ -530,27 +547,44 @@ class TableWidget extends WidgetType {
         const currentRow = rc.row;
         const currentCol = rc.col;
 
-        // ★★★ 1. まず現在のセルをコミット（保存）する ★★★
-        // （`dispatchReplace` は非同期なので、移動/行追加の *前* に呼ぶ）
-        commit();
+        // ★ (v20) 1. DO NOT commit(). Read value directly.
+        const val = extractValue();
+        
+        // ★ (v20) 2. Get the latest block from state.
+        const currentBlock = this.getBlockAtFrom(view.state, from) ?? this.block;
+        
+        // ★ (v20) 3. Create the updated block (with saved value) IN MEMORY.
+        const newRows = currentBlock.rows.map((r, i) => (i === currentRow ? [...r] : r.slice()));
+        if (!newRows[currentRow]) newRows[currentRow] = Array(colCount).fill('');
+        while(newRows[currentRow].length < colCount) newRows[currentRow].push('');
+        newRows[currentRow][currentCol] = val;
+        
+        const updatedBlock: TableBlock = { ...currentBlock, rows: newRows };
+        
 
         if (currentRow < rowCount - 1) {
             // ★ 最後以外の行 → 次の行にフォーカス
             const nextRow = currentRow + 1;
-            console.log(`${logPrefix} KEYDOWN: Enter -> Move to next row (${nextRow}, ${currentCol})`);
-            this.focusCellAt(view, from, nextRow, currentCol);
+            console.log(`${logPrefix} KEYDOWN: Enter (v21) -> Saving and Moving to next row (${nextRow}, ${currentCol})`);
+            
+            // ★ (v20) 4a. Dispatch ONCE.
+            this.dispatchReplace(view, updatedBlock, (latestFrom) => {
+                this.focusCellAt(view, latestFrom ?? from, nextRow, currentCol);
+            });
             
         } else {
             // ★ 最後の行 → 新規行追加
-            console.log(`${logPrefix} KEYDOWN: Enter (End of table) -> Add row`);
-            const block = this.getBlockAtFrom(view.state, from) ?? this.block;
-            const newRow = Array(colCount).fill('');
-            const updated: TableBlock = { ...block, rows: [...block.rows, newRow] };
+            console.log(`${logPrefix} KEYDOWN: Enter (v21 End of table) -> Saving and Adding row`);
             
-            // `dispatchReplace` で行を追加し、`after` コールバックで新しい行にフォーカス
-            this.dispatchReplace(view, updated, (latestFrom) => {
-                const newRowIndex = rowCount; // 0-indexed なので rowCount が新しい行のインデックス
-                console.log(`${logPrefix} KEYDOWN: Enter (Add row) -> Focusing new row (${newRowIndex}, ${currentCol})`);
+            // ★ (v20) 4b. Add new row to the IN-MEMORY block.
+            const newRow = Array(colCount).fill('');
+            updatedBlock.rows.push(newRow); // Mutate the block we just made
+            
+            const newRowIndex = rowCount; // 0-indexed, so rowCount is the new index
+            
+            // ★ (v20) 4c. Dispatch ONCE.
+            this.dispatchReplace(view, updatedBlock, (latestFrom) => {
+                console.log(`${logPrefix} KEYDOWN: Enter (v21 Add row) -> Focusing new row (${newRowIndex}, ${currentCol})`);
                 this.focusCellAt(view, latestFrom ?? from, newRowIndex, currentCol);
             });
         }
@@ -560,14 +594,30 @@ class TableWidget extends WidgetType {
       // (v9) 矢印キーやTabでは commit() しない（keymap に任せる）
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
           console.log(`${logPrefix} KEYDOWN: Arrow/Tab. Passing event to keymap.`);
+          // ★ (v23) これから blur が発生することをフラグで伝える
+          this.isIntentionalBlur = true;
       }
     });
 
-    // (v14 の mousedown リスナー)
+    // ★ (v23) mousedown リスナー
     el.addEventListener('mousedown', (e) => {
       console.log(`${logPrefix} mousedown (row: ${row}, col: ${col})`);
-      // (v14) 左クリックは必ずメニューフラグをリセットする
-      this.isOpeningContextMenu = false;
+      
+      // ★ (v23) これから blur が発生することをフラグで伝える
+      //    (ただし、右クリックの場合は contextmenu リスナーが優先される)
+      if (e.button === 0) { // 左クリックのみ
+        this.isIntentionalBlur = true;
+      }
+      
+      // (v21) v14 のフラグリセットロジックを (v16 と同様に) mousedown に移動
+      if (this.isProgrammaticFocus) {
+          console.log(`${logPrefix} mousedown: Resetting programmatic focus flag`);
+          this.isProgrammaticFocus = false;
+      }
+      if (this.isOpeningContextMenu) {
+           console.log(`${logPrefix} mousedown: Resetting context menu flag`);
+          this.isOpeningContextMenu = false;
+      }
     });
 
     // (v14 の contextmenu リスナー)
@@ -577,6 +627,8 @@ class TableWidget extends WidgetType {
       
       // (v14) これから `blur` が発生することをフラグで伝える
       this.isOpeningContextMenu = true;
+      // (v23) 左クリックでのフラグはリセット
+      this.isIntentionalBlur = false;
       
       const container = getTableWidgetContainer(el);
       if (!container) return;
@@ -777,15 +829,20 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
     if (tr) target = tr.children[col] as HTMLElement | null;
   }
   
-  // (v10) focusCellAt とは異なり、Widget インスタンスにアクセスできないため、
-  //       isProgrammaticFocus フラグはここでは *セットできない*
-  //       (v16 の blur リスナーが `relatedTarget` で処理するのを期待する)
-  
   if (target) {
     // (v10) setTimeout でフォーカスを当てる
     setTimeout(() => {
         console.log(`${logPrefix} focusCell(async): Calling .focus() on target...`);
+        // (v23)
+        // ここで isProgrammaticFocus = true にしたいが、widget インスタンスに
+        // アクセスできない。
+        // 代わりに、focusCell を呼び出す keydown 側 (buildCell or moveHorizontal) が
+        // isIntentionalBlur = true にセットするので、
+        // .focus() がトリガーする blur は v23 の blur リスナーで
+        // "Skipped commit (blur was intentional)" となり、正しくスキップされる。
+        
         target?.focus();
+        
         // カーソルを末尾に
         try {
           if (target && target.firstChild instanceof Text) {
@@ -797,7 +854,7 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
             s?.addRange(r);
           }
         } catch { /* noop */ }
-    }, 0);
+    }, 50); // (v20) 0ms -> 50ms に延長
   } else {
      console.warn(`${logPrefix} focusCell: Target cell (row: ${row}, col: ${col}) not found in container.`);
   }
