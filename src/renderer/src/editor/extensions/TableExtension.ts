@@ -184,6 +184,10 @@ class TableWidget extends WidgetType {
     }
     const result = (other instanceof TableWidget) && eq(other);
     console.log(`${logPrefix} eq(): ${result}`);
+    // ★ (v23) eq() で状態を引き継ぐロジックは（v24のリサイズ機能で）必要
+    // if (result && other instanceof TableWidget) {
+    //   (other as TableWidget).currentColWidths = this.currentColWidths;
+    // }
     return result;
   }
 
@@ -261,6 +265,8 @@ class TableWidget extends WidgetType {
           
           // ★ (v16) これから .focus() を呼ぶことをフラグで伝える
           this.isProgrammaticFocus = true;
+          // ★ (v23) blur リスナーがチェックできるよう、isIntentionalBlur もセット
+          this.isIntentionalBlur = true;
           
           target.focus();
           
@@ -465,7 +471,7 @@ class TableWidget extends WidgetType {
       
       // ★ (v23) セルがフォーカスを得たら、すべての「意図的blur」フラグをリセット
       this.isProgrammaticFocus = false;
-      this.isHandledKeyDown = false;
+      this.isIntentionalBlur = false;
       this.isOpeningContextMenu = false;
     });
     
@@ -653,6 +659,9 @@ class TableWidget extends WidgetType {
     container.style.border = '1px dashed #ddd';
     container.style.borderRadius = '4px';
     container.style.margin = '1em 0';
+    
+    // (v24) toDOM には colgroup/resize ハンドラは不要（v23互換のため）
+    // v23 のロジックを維持
 
     const table = document.createElement('table');
     table.style.borderCollapse = 'collapse';
