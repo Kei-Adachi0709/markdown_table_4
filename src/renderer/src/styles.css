@@ -56,3 +56,25 @@ html, body, #root {
   min-height: 0;
   background: #ffffff;
 }
+
+/* ★ (v20) テーブルリサイズハンドル */
+.cm-table-resizer {
+  position: absolute;
+  top: 0;
+  right: -2px; /* セルの境界線上に配置 */
+  width: 4px; /* クリック領域 */
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+  /* background-color: rgba(0, 100, 255, 0.1); */ /* デバッグ用 */
+}
+
+/* ★ (v20) リサイズ中のテキスト選択を無効化 */
+body.cm-table-resizing {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cm-table-resizing .cm-editor {
+  user-select: none;
+  -webkit-user-select: none;
+}

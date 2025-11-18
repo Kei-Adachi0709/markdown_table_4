@@ -33,7 +33,7 @@ interface TableBlock {
 
 // (v8) テーブルを Markdown テキストに戻す
 function serializeTable(block: TableBlock): string {
-  console.log(`${logPrefix} serializeTable()`);
+  // console.log(`${logPrefix} serializeTable()`);
   const colCount = Math.max(block.headers.length, ...block.rows.map(r => r.length));
   const headers = Array.from({ length: colCount }, (_, i) => block.headers[i] ?? '');
   const aligns = Array.from({ length: colCount }, (_, i) => block.aligns[i] ?? null);
@@ -62,6 +62,7 @@ function serializeTable(block: TableBlock): string {
 
 // (v8) ドキュメント全体をパースしてテーブルブロックの配列を返す
 function parseTablesInDoc(state: EditorState): TableBlock[] {
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} parseTablesInDoc()`);
   const blocks: TableBlock[] = [];
   const tree = syntaxTree(state);
@@ -117,6 +118,7 @@ function parseTablesInDoc(state: EditorState): TableBlock[] {
       blocks.push({ from, to, headers, aligns, rows });
     }
   });
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} parseTablesInDoc: ${blocks.length} tables found.`);
   return blocks;
 }
@@ -138,11 +140,7 @@ function getCellRC(el: HTMLElement | null): { row: number | null; col: number } 
   // (v19) <tbody> がない場合 (toDOM が thead の次に行を追加した場合) も考慮
   const tbody = rowEl.closest('tbody');
   if (tbody) {
-      // <tbody> があり、その中に <tr> がある場合
-      // rowEl.rowIndex は <thead> の行数を考慮したインデックス (e.g., thead 1行なら 1 から始まる)
-      // <thead> が 1行 の場合、<tbody> の 1行目 (row: 0) は rowIndex: 1
-      const theadRowCount = tbody.parentElement?.querySelector('thead')?.rows.length ?? 0;
-      return { row: rowEl.rowIndex - theadRowCount, col };
+      return { row: rowEl.rowIndex - 1, col }; // <tbody> の <tr> は rowIndex が 1 から始まる (thead があれば)
   }
   // (v19) thead の直後の tr の場合 (tbody がない)
   if (rowEl.parentElement?.tagName === 'TABLE') {
@@ -164,8 +162,16 @@ class TableWidget extends WidgetType {
   private isOpeningContextMenu = false;
   // (v16) プログラムによるフォーカス移動中フラグ
   private isProgrammaticFocus = false;
-  // ★ (v23) キー操作またはマウス操作による意図的な blur かを判定するフラグ
-  private isIntentionalBlur = false;
+
+  // ★ (v20) リサイズ中の列の <col> 要素
+  private resizingCol: HTMLTableColElement | null = null;
+  // ★ (v20) リサイズ開始時のマウスX座標
+  private resizeStartX = 0;
+  // ★ (v20) リサイズ開始時の列幅
+  private resizeStartWidth = 0;
+  // ★ (v20) document にバインドされたリスナー（解除用）
+  private resizeMouseMoveListener = (e: MouseEvent) => this.handleResizeMouseMove(e);
+  private resizeMouseUpListener = (e: MouseEvent) => this.handleResizeMouseUp(e);
   
   constructor(private block: TableBlock) {
     super();
@@ -183,11 +189,7 @@ class TableWidget extends WidgetType {
        return true;
     }
     const result = (other instanceof TableWidget) && eq(other);
-    console.log(`${logPrefix} eq(): ${result}`);
-    // ★ (v23) eq() で状態を引き継ぐロジックは（v24のリサイズ機能で）必要
-    // if (result && other instanceof TableWidget) {
-    //   (other as TableWidget).currentColWidths = this.currentColWidths;
-    // }
+    // console.log(`${logPrefix} eq(): ${result}`);
     return result;
   }
 
@@ -196,7 +198,7 @@ class TableWidget extends WidgetType {
     // key イベントはエディタに流す（keymap を効かせる）
     // それ以外の DOM イベント (click, input, contextmenu...) はウィジェット内で処理
     const ignored = event.type !== 'keydown' && event.type !== 'keyup';
-    // console.log(`${logPrefix} ignoreEvent(${event.type}): ${ignored}`); // ログが多すぎるため v18 でコメントアウト
+    // // console.log(`${logPrefix} ignoreEvent(${event.type}): ${ignored}`); // ログが多すぎるため v18 でコメントアウト
     return ignored;
   }
 
@@ -265,8 +267,6 @@ class TableWidget extends WidgetType {
           
           // ★ (v16) これから .focus() を呼ぶことをフラグで伝える
           this.isProgrammaticFocus = true;
-          // ★ (v23) blur リスナーがチェックできるよう、isIntentionalBlur もセット
-          this.isIntentionalBlur = true;
           
           target.focus();
           
@@ -284,7 +284,7 @@ class TableWidget extends WidgetType {
         }
       };
       // (v8) dispatch が非同期なので、フォーカスも非同期（DOM 更新後）
-      setTimeout(tryFocus, 50); // (v20) 0ms -> 50ms に延長し、DOM更新を待つ
+      setTimeout(tryFocus, 0);
     } catch (e) {
       console.error(`${logPrefix} focusCellAt: Error`, e);
     }
@@ -292,7 +292,7 @@ class TableWidget extends WidgetType {
 
   // (v8 の getBlockAtFrom)
   private getBlockAtFrom = (state: EditorState, from: number): TableBlock | null => {
-    console.log(`${logPrefix} getBlockAtFrom(from: ${from})`);
+    // console.log(`${logPrefix} getBlockAtFrom(from: ${from})`);
     const blocks = parseTablesInDoc(state);
     const block = blocks.find(b => b.from === from) ?? null;
     if (!block) console.warn(`${logPrefix} getBlockAtFrom: Block not found at ${from}`);
@@ -402,23 +402,16 @@ class TableWidget extends WidgetType {
       return it;
     };
 
-    // ★ (v23)
     const closeOnOutside = (e: MouseEvent) => {
       if (!menu.contains(e.target as Node)) {
         console.log(`${logPrefix} Closing context menu (click outside)`);
         menu.remove();
-        // ★ (v23) フラグのリセットは mousedown / focus が行う
+        // (v14) フラグのリセットは mousedown / blur が行う
         // this.isOpeningContextMenu = false; 
         document.removeEventListener('click', closeOnOutside);
-        document.removeEventListener('mousedown', closeOnOutside); // (v23) mousedown も監視
       }
     };
-    // (v23) mousedown も監視
-    setTimeout(() => {
-        document.addEventListener('click', closeOnOutside);
-        document.addEventListener('mousedown', closeOnOutside);
-    }, 0);
-
+    setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
 
     const rowOpsEnabled = rc.row != null;
     const colOpsEnabled = true;
@@ -442,7 +435,68 @@ class TableWidget extends WidgetType {
     document.body.appendChild(menu);
   }
 
-  // ★★★ 修正 (v23): `focus`, `blur`, `keydown`, `mousedown` リスナー ★★★
+  // ★ (v20) リサイズロジック
+  // ★★★ (v22) 修正: colIndex を引数で受け取る
+  private handleResizeMousedown = (e: MouseEvent, colEl: HTMLTableColElement, colIndex: number) => {
+    // ★ (v21) ログ復活
+    // const colIndex = Array.from(colEl.parentElement?.children ?? []).indexOf(colEl); // ★ (v22) 削除 (バグの原因)
+    console.log(`${logPrefix} [RESIZE] mousedown (col: ${colIndex})`);
+    
+    e.preventDefault();
+    e.stopPropagation();
+
+    this.resizingCol = colEl;
+    this.resizeStartX = e.clientX;
+    this.resizeStartWidth = colEl.offsetWidth; // 現在の幅を取得
+
+    // (v20) リサイズ中はテキスト選択無効（styles.css も参照）
+    document.body.classList.add('cm-table-resizing');
+    document.addEventListener('mousemove', this.resizeMouseMoveListener);
+    document.addEventListener('mouseup', this.resizeMouseUpListener);
+  }
+
+  private handleResizeMouseMove = (e: MouseEvent) => {
+    if (!this.resizingCol) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const diffX = e.clientX - this.resizeStartX;
+    const newWidth = Math.max(50, this.resizeStartWidth + diffX); // 最小幅 50px
+
+    // ★ (v21) ログ復活
+    // console.log(`${logPrefix} [RESIZE] mousemove (newWidth: ${newWidth}px)`);
+
+    // (v20) <col> の幅を直接変更
+    this.resizingCol.style.width = `${newWidth}px`;
+
+    // (v20) table-layout: fixed を強制
+    if (this.container) {
+        const table = this.container.querySelector('table');
+        if (table && table.style.tableLayout !== 'fixed') {
+             console.log(`${logPrefix} [RESIZE] mousemove: Setting table-layout: fixed`);
+             table.style.tableLayout = 'fixed';
+        }
+    }
+  }
+
+  private handleResizeMouseUp = (e: MouseEvent) => {
+    // ★ (v21) ログ復活
+    console.log(`${logPrefix} [RESIZE] mouseup`);
+    e.preventDefault();
+    e.stopPropagation();
+
+    this.resizingCol = null;
+    document.body.classList.remove('cm-table-resizing');
+    document.removeEventListener('mousemove', this.resizeMouseMoveListener);
+    document.removeEventListener('mouseup', this.resizeMouseUpListener);
+
+    // TODO: ここで this.colWidths[col] = newWidth のように永続化できるが、
+    // eq() が false になり再描画されると <col> がリセットされるため、
+    // 今回はウィジェットの内部状態 (colWidths) には保存しない（＝再描画でリセットされる）
+  }
+
+  // ★★★ 修正 (v20): `buildCell` (リサイズハンドルの追加) ★★★
   private buildCell = (
     tag: 'th' | 'td',
     text: string,
@@ -450,9 +504,13 @@ class TableWidget extends WidgetType {
     row: number | null,
     al: Align,
     updateValue: (val: string) => void,
-    view: EditorView
+    view: EditorView,
+    // ★ (v20) <col> 要素をリサイズ用に受け取る
+    colEl: HTMLTableColElement | null 
   ) => {
+    // ★ (v21) ログ復活
     console.log(`${logPrefix} buildCell(tag: ${tag}, row: ${row}, col: ${col})`);
+    
     const el = document.createElement(tag);
     el.contentEditable = 'true';
     el.textContent = text;
@@ -461,44 +519,51 @@ class TableWidget extends WidgetType {
     el.style.textAlign = al ?? 'left';
     el.style.padding = '4px 8px';
     el.style.border = '1px solid #ccc';
-    el.style.position = 'relative'; 
+    el.style.position = 'relative'; // ★ resizer のために relative
     el.style.outline = 'none';
 
-    // ★ (v23) focus リスナー: すべてのフラグをリセット
+    // ★ (v20) ヘッダーセル (th) かつ <col> が渡された場合のみリサイズハンドルを追加
+    if (tag === 'th' && colEl) {
+      const resizer = document.createElement('div');
+      resizer.className = 'cm-table-resizer';
+      // (スタイルは styles.css で定義)
+      
+      // (v20) mousedown でリサイズ開始
+      // ★★★ (v22) 修正: `col` を handleResizeMousedown に渡す
+      resizer.addEventListener('mousedown', (e) => {
+        this.handleResizeMousedown(e, colEl, col); // 'col' は buildCell の引数
+      });
+      el.appendChild(resizer);
+    }
+
+    // ★ (v16) focus リスナー: プログラムフォーカスフラグをリセット
     el.addEventListener('focus', () => {
+      // ★ (v21) ログ復活
       console.log(`${logPrefix} FOCUS (row: ${row}, col: ${col})`);
       el.style.boxShadow = 'inset 0 0 0 2px #007bff';
       
-      // ★ (v23) セルがフォーカスを得たら、すべての「意図的blur」フラグをリセット
+      // ★ (v16) フォーカスを受け取ったので、フラグをリセット
       this.isProgrammaticFocus = false;
-      this.isIntentionalBlur = false;
-      this.isOpeningContextMenu = false;
     });
     
+    // ★★★ (v22) 修正: text が変更された場合のみ commit する
+    const originalText = text; // (v22) 元のテキストを保存
     const extractValue = () => (el.textContent ?? '').replace(/\r?\n/g, ' ');
     const commit = () => {
-      // (v11) DOM に接続されていない（=再描画で破棄された）セルのコミットは防ぐ
-      if (!el.isConnected) {
-        console.log(`${logPrefix} commit() SKIPPED (row: ${row}, col: ${col}) - element disconnected`);
+      // (v22) 値が変更されたかチェック
+      const newValue = extractValue();
+      if (newValue === originalText) {
+        console.log(`${logPrefix} commit() SKIPPED (row: ${row}, col: ${col}): Value did not change.`);
         return;
       }
+      
       console.log(`${logPrefix} commit() CALLED (row: ${row}, col: ${col})`);
-      updateValue(extractValue());
+      updateValue(newValue);
     }
     
-    // ★ (v23) blur リスナー: 3つのフラグをチェック
+    // ★ (v16) blur リスナー: isProgrammaticFocus をチェック
     el.addEventListener('blur', (e: FocusEvent) => {
-      console.log(`${logPrefix} BLUR (row: ${row}, col: ${col})`);
       el.style.boxShadow = 'none';
-
-      // ★ (v23) 最優先チェック: Enter/矢印/Tab/MouseDown が（直前に）発火していたら、
-      //    この blur はその結果なので、コミットをスキップする
-      if (this.isIntentionalBlur) {
-        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (blur was intentional)`);
-        // (v23) フラグは focus リスナーがリセットする
-        // this.isIntentionalBlur = false; 
-        return; 
-      }
 
       // ★ (v16) もし `focusCellAt` が（直前に）発火していたら、
       //    この blur はその結果なので、コミットをスキップする
@@ -512,10 +577,26 @@ class TableWidget extends WidgetType {
       //    この blur はメニューを開くためのものなので、コミットをスキップする
       if (this.isOpeningContextMenu) {
         console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (blur was from context menu)`);
-        // (v14 -> v21) フラグのリセットは focus / mousedown が行う
+        // (v14) フラグをここでリセット
+        this.isOpeningContextMenu = false; 
         return; 
       }
       
+      // (v10) フォーカスがテーブル内の別のセルに移動したかチェック
+      const relatedTarget = e.relatedTarget as HTMLElement | null;
+      const container = this.container; 
+
+      if (container && relatedTarget && container.contains(relatedTarget)) {
+        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (focus moved to another cell)`);
+        return; 
+      }
+      
+      // (v11) セルが DOM から切り離されていたらコミットしない
+      if (!el.isConnected) {
+        console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Skipped commit (element is disconnected)`);
+        return; 
+      }
+
       // (v10) フォーカスがテーブル外に移動した、または不明
       console.log(`${logPrefix} BLUR (row: ${row}, col: ${col}): Committing (focus left table or lost)`);
       commit(); 
@@ -525,17 +606,24 @@ class TableWidget extends WidgetType {
       // noop
     });
     
-    // ★★★ (v23) keydown リスナー: (v21のロジック + isIntentionalBlur) ★★★
+    // ★★★ (v25) 修正: keydown リスナー (編集キーの伝播を停止) ★★★
     el.addEventListener('keydown', (e) => {
-      console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key}`);
       
+      // 1. Keys handled by tableKeymap (Arrows, Tab, PgUp/Dn, Mod-c)
+      // We must let these propagate to CodeMirror
+      const isNavKey = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'PageUp', 'PageDown'].includes(e.key);
+      const isCopy = (e.metaKey || e.ctrlKey) && e.key === 'c';
+
+      if (isNavKey || isCopy) {
+        console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key} (Passing to tableKeymap)`);
+        return; // ★ Let event propagate
+      }
+
+      // 2. Enter key (handled here)
       if (e.key === 'Enter') {
-        e.preventDefault(); // ★ セル内改行を防ぐ
-        
-        // ★ (v23) これから blur が発生することをフラグで伝える
-        this.isIntentionalBlur = true;
-        
-        console.log(`${logPrefix} KEYDOWN: Enter. Handling move/add row (v21)...`);
+        e.preventDefault(); // ★ Prevent default (newline)
+        e.stopPropagation(); // ★ Stop propagation
+        console.log(`${logPrefix} KEYDOWN: Enter. Handling move/add row...`);
 
         const container = getTableWidgetContainer(el);
         if (!container) return;
@@ -544,86 +632,55 @@ class TableWidget extends WidgetType {
         const rowCount = parseInt(container.dataset.rowCount!, 10);
         const colCount = parseInt(container.dataset.colCount!, 10);
         
-        const rc = getCellRC(el); // { row: number | null, col: number }
-        if (!rc || rc.row == null) { // ヘッダーでは Enter を無視
-            console.log(`${logPrefix} KEYDOWN: Enter pressed in header, ignoring.`);
-            return;
-        }
-        
+        const rc = getCellRC(el); 
+        if (!rc) return;
+
         const currentRow = rc.row;
         const currentCol = rc.col;
 
-        // ★ (v20) 1. DO NOT commit(). Read value directly.
-        const val = extractValue();
-        
-        // ★ (v20) 2. Get the latest block from state.
-        const currentBlock = this.getBlockAtFrom(view.state, from) ?? this.block;
-        
-        // ★ (v20) 3. Create the updated block (with saved value) IN MEMORY.
-        const newRows = currentBlock.rows.map((r, i) => (i === currentRow ? [...r] : r.slice()));
-        if (!newRows[currentRow]) newRows[currentRow] = Array(colCount).fill('');
-        while(newRows[currentRow].length < colCount) newRows[currentRow].push('');
-        newRows[currentRow][currentCol] = val;
-        
-        const updatedBlock: TableBlock = { ...currentBlock, rows: newRows };
-        
+        // ★ (v23) Commit current cell *before* moving
+        commit();
 
+        // ★ (v23) Fix 1: Enter on header (currentRow == null) moves to row 0
+        if (currentRow == null) {
+            console.log(`${logPrefix} KEYDOWN: Enter (Header) -> Move to row 0`);
+            this.focusCellAt(view, from, 0, currentCol);
+            return;
+        }
+
+        // (v19) Existing logic for data rows
         if (currentRow < rowCount - 1) {
-            // ★ 最後以外の行 → 次の行にフォーカス
+            // ★ Not last row -> move to next row
             const nextRow = currentRow + 1;
-            console.log(`${logPrefix} KEYDOWN: Enter (v21) -> Saving and Moving to next row (${nextRow}, ${currentCol})`);
-            
-            // ★ (v20) 4a. Dispatch ONCE.
-            this.dispatchReplace(view, updatedBlock, (latestFrom) => {
-                this.focusCellAt(view, latestFrom ?? from, nextRow, currentCol);
-            });
-            
+            console.log(`${logPrefix} KEYDOWN: Enter (Data Row) -> Move to next row (${nextRow}, ${currentCol})`);
+            this.focusCellAt(view, from, nextRow, currentCol);
         } else {
-            // ★ 最後の行 → 新規行追加
-            console.log(`${logPrefix} KEYDOWN: Enter (v21 End of table) -> Saving and Adding row`);
-            
-            // ★ (v20) 4b. Add new row to the IN-MEMORY block.
+            // ★ Last row -> add new row
+            console.log(`${logPrefix} KEYDOWN: Enter (End of table) -> Add row`);
+            const block = this.getBlockAtFrom(view.state, from) ?? this.block;
             const newRow = Array(colCount).fill('');
-            updatedBlock.rows.push(newRow); // Mutate the block we just made
+            const updated: TableBlock = { ...block, rows: [...block.rows, newRow] };
             
-            const newRowIndex = rowCount; // 0-indexed, so rowCount is the new index
-            
-            // ★ (v20) 4c. Dispatch ONCE.
-            this.dispatchReplace(view, updatedBlock, (latestFrom) => {
-                console.log(`${logPrefix} KEYDOWN: Enter (v21 Add row) -> Focusing new row (${newRowIndex}, ${currentCol})`);
+            this.dispatchReplace(view, updated, (latestFrom) => {
+                const newRowIndex = rowCount; 
+                console.log(`${logPrefix} KEYDOWN: Enter (Add row) -> Focusing new row (${newRowIndex}, ${currentCol})`);
                 this.focusCellAt(view, latestFrom ?? from, newRowIndex, currentCol);
             });
         }
         return;
       }
       
-      // (v9) 矢印キーやTabでは commit() しない（keymap に任せる）
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
-          console.log(`${logPrefix} KEYDOWN: Arrow/Tab. Passing event to keymap.`);
-          // ★ (v23) これから blur が発生することをフラグで伝える
-          this.isIntentionalBlur = true;
-      }
+      // 3. ALL OTHER KEYS (Backspace, Delete, letters, Mod-v, Mod-x, etc.)
+      // Handled by contentEditable. Stop propagation to prevent CM handling.
+      console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key} (Handling as contentEditable input, STOPPING propagation)`);
+      e.stopPropagation(); // ★★★ STOP PROPAGATION
     });
 
-    // ★ (v23) mousedown リスナー
+    // (v14 の mousedown リスナー)
     el.addEventListener('mousedown', (e) => {
-      console.log(`${logPrefix} mousedown (row: ${row}, col: ${col})`);
-      
-      // ★ (v23) これから blur が発生することをフラグで伝える
-      //    (ただし、右クリックの場合は contextmenu リスナーが優先される)
-      if (e.button === 0) { // 左クリックのみ
-        this.isIntentionalBlur = true;
-      }
-      
-      // (v21) v14 のフラグリセットロジックを (v16 と同様に) mousedown に移動
-      if (this.isProgrammaticFocus) {
-          console.log(`${logPrefix} mousedown: Resetting programmatic focus flag`);
-          this.isProgrammaticFocus = false;
-      }
-      if (this.isOpeningContextMenu) {
-           console.log(`${logPrefix} mousedown: Resetting context menu flag`);
-          this.isOpeningContextMenu = false;
-      }
+      // console.log(`${logPrefix} mousedown (row: ${row}, col: ${col})`);
+      // (v14) 左クリックは必ずメニューフラグをリセットする
+      this.isOpeningContextMenu = false;
     });
 
     // (v14 の contextmenu リスナー)
@@ -633,8 +690,6 @@ class TableWidget extends WidgetType {
       
       // (v14) これから `blur` が発生することをフラグで伝える
       this.isOpeningContextMenu = true;
-      // (v23) 左クリックでのフラグはリセット
-      this.isIntentionalBlur = false;
       
       const container = getTableWidgetContainer(el);
       if (!container) return;
@@ -647,6 +702,7 @@ class TableWidget extends WidgetType {
   }
 
   // ★ toDOM はアロー関数 ( = ) に *しない*
+  // ★★★ 修正 (v20): `toDOM` (<colgroup> の追加) ★★★
   toDOM(view: EditorView): HTMLElement {
     console.log(`${logPrefix} toDOM() [from: ${this.block.from}]`);
     const container = document.createElement('div');
@@ -659,17 +715,14 @@ class TableWidget extends WidgetType {
     container.style.border = '1px dashed #ddd';
     container.style.borderRadius = '4px';
     container.style.margin = '1em 0';
-    
-    // (v24) toDOM には colgroup/resize ハンドラは不要（v23互換のため）
-    // v23 のロジックを維持
 
     const table = document.createElement('table');
     table.style.borderCollapse = 'collapse';
     table.style.width = '100%';
+    // ★ (v20) リサイズのために table-layout: auto (初期) にしておく
+    // (リサイズ開始時に 'fixed' に変更される)
+    table.style.tableLayout = 'auto';
 
-    const thead = document.createElement('thead');
-    const trh = document.createElement('tr');
-    trh.style.backgroundColor = '#f8f8f8';
 
     const colCount = Math.max(
       this.block.headers.length,
@@ -680,11 +733,29 @@ class TableWidget extends WidgetType {
     container.dataset.colCount = colCount.toString();
     container.dataset.rowCount = this.block.rows.length.toString();
 
+    // ★ (v20) <colgroup> を生成
+    const colgroup = document.createElement('colgroup');
+    const colEls: HTMLTableColElement[] = [];
+    for (let i = 0; i < colCount; i++) {
+        const colEl = document.createElement('col');
+        // (v20) 現状は幅を永続化していないので、ここでは幅を指定しない
+        // (auto layout に任せる)
+        // colEl.style.width = `${100 / colCount}%`; 
+        colgroup.appendChild(colEl);
+        colEls.push(colEl);
+    }
+    table.appendChild(colgroup);
+
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    trh.style.backgroundColor = '#f8f8f8';
+
     const headers = Array.from({ length: colCount }, (_, i) => this.block.headers[i] ?? '');
     const aligns = Array.from({ length: colCount }, (_, i) => this.block.aligns[i] ?? null);
 
     // (v8) ヘッダーセルの構築
     headers.forEach((text, col) => {
+      // ★ (v20) 対応する <col> を buildCell に渡す
       const th = this.buildCell('th', text, col, null, aligns[col] ?? null, (val) => {
         // (v8) commit (updateValue) 時に最新の block を取得
         console.log(`${logPrefix} updateValue (Header col: ${col}): '${val}'`);
@@ -696,7 +767,7 @@ class TableWidget extends WidgetType {
         };
         // (v8) dispatchReplace に (latestFrom) => ... を渡す
         this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? this.block.from, null, col));
-      }, view);
+      }, view, colEls[col] ?? null); // ★ (v20)
       trh.appendChild(th);
     });
     thead.appendChild(trh);
@@ -706,6 +777,7 @@ class TableWidget extends WidgetType {
     this.block.rows.forEach((row, rIdx) => {
       const tr = document.createElement('tr');
       for (let c = 0; c < colCount; c++) {
+        // ★ (v20) <td> にはリサイズハンドル不要なので null を渡す
         const td = this.buildCell('td', row[c] ?? '', c, rIdx, aligns[c] ?? null, (val) => {
           // (v8) commit (updateValue) 時に最新の block を取得
           console.log(`${logPrefix} updateValue (Body row: ${rIdx}, col: ${c}): '${val}'`);
@@ -720,7 +792,7 @@ class TableWidget extends WidgetType {
           const updated: TableBlock = { ...currentBlock, rows: newRows };
           // (v8) dispatchReplace に (latestFrom) => ... を渡す
           this.dispatchReplace(view, updated, (latestFrom) => this.focusCellAt(view, latestFrom ?? this.block.from, rIdx, c));
-        }, view);
+        }, view, null); // ★ (v20)
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -746,7 +818,7 @@ class TableWidget extends WidgetType {
 
 // (v10 の buildDecorations)
 function buildDecorations(state: EditorState): DecorationSet {
-  console.log(`${logPrefix} buildDecorations()`);
+  // console.log(`${logPrefix} buildDecorations()`);
   const builder = new RangeSetBuilder<Decoration>();
   // (v10) state (EditorState) を渡す
   const blocks = parseTablesInDoc(state); 
@@ -769,7 +841,7 @@ export const tableDecoField = StateField.define<DecorationSet>({
     return buildDecorations(state);
   },
   update(value, tr) {
-    console.log(`${logPrefix} tableDecoField.update()`);
+    // console.log(`${logPrefix} tableDecoField.update()`);
     if (!tr.docChanged) return value;
     console.log(`${logPrefix} tableDecoField.update(): doc changed, rebuilding decorations.`);
     // (v10) tr.state (新しい EditorState) を渡す
@@ -782,6 +854,7 @@ export const tableDecoField = StateField.define<DecorationSet>({
 
 // (v10 の getActiveCellContext)
 function getActiveCellContext(view: EditorView) {
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} getActiveCellContext()`);
   const sel = view.state.selection.main;
   const focused = view.hasFocus ? document.activeElement : null;
@@ -821,6 +894,7 @@ function getActiveCellContext(view: EditorView) {
 
 // (v10 の focusCell)
 function focusCell(view: EditorView, from: number, row: number | null, col: number) {
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} focusCell(from: ${from}, row: ${row}, col: ${col})`);
   const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
   if (!container) {
@@ -838,32 +912,28 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
     if (tr) target = tr.children[col] as HTMLElement | null;
   }
   
+  // (v10) focusCellAt とは異なり、Widget インスタンスにアクセスできないため、
+  //       isProgrammaticFocus フラグはここでは *セットできない*
+  //       (v16 の blur リスナーが `relatedTarget` で処理するのを期待する)
+  
   if (target) {
     // (v10) setTimeout でフォーカスを当てる
     setTimeout(() => {
         console.log(`${logPrefix} focusCell(async): Calling .focus() on target...`);
-        // (v23)
-        // ここで isProgrammaticFocus = true にしたいが、widget インスタンスに
-        // アクセスできない。
-        // 代わりに、focusCell を呼び出す keydown 側 (buildCell or moveHorizontal) が
-        // isIntentionalBlur = true にセットするので、
-        // .focus() がトリガーする blur は v23 の blur リスナーで
-        // "Skipped commit (blur was intentional)" となり、正しくスキップされる。
-        
         target?.focus();
-        
         // カーソルを末尾に
-        try {
+        try { // line 921
           if (target && target.firstChild instanceof Text) {
             const s = window.getSelection();
             const r = document.createRange();
             r.selectNodeContents(target);
             r.collapse(false);
             s?.removeAllRanges();
-            s?.addRange(r);
+            s?.addRange(r); // line 928
           }
-        } catch { /* noop */ }
-    }, 50); // (v20) 0ms -> 50ms に延長
+        } // ★★★ (v24) 修正: 構文エラーを修正 (catch を追加)
+        catch { /* noop */ }
+    }, 0);
   } else {
      console.warn(`${logPrefix} focusCell: Target cell (row: ${row}, col: ${col}) not found in container.`);
   }
@@ -874,6 +944,7 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
 
 // (v10 の Tab, Shift+Tab)
 function cmdTab(view: EditorView): boolean {
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} keymap: Tab`);
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
@@ -895,6 +966,7 @@ function cmdTab(view: EditorView): boolean {
   return true;
 }
 function cmdShiftTab(view: EditorView): boolean {
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} keymap: Shift-Tab`);
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
@@ -919,6 +991,7 @@ function cmdShiftTab(view: EditorView): boolean {
 // (v10 の 矢印キー移動)
 function moveHorizontal(dir: 'left' | 'right') {
   return (view: EditorView): boolean => {
+    // ★ (v23) ログ復活
     console.log(`${logPrefix} keymap: Arrow ${dir}`);
     const ctx = getActiveCellContext(view);
     if (!ctx) return false;
@@ -939,6 +1012,7 @@ function moveHorizontal(dir: 'left' | 'right') {
 }
 function moveVertical(dir: 'up' | 'down') {
   return (view: EditorView): boolean => {
+    // ★ (v23) ログ復活
     console.log(`${logPrefix} keymap: Arrow ${dir}`);
     const ctx = getActiveCellContext(view);
     if (!ctx) return false;
@@ -967,20 +1041,55 @@ function moveVertical(dir: 'up' | 'down') {
   };
 }
 
+// ★★★ (v23) 新規: PgUp/PgDn のための関数 ★★★
+function moveVerticalPage(dir: 'up' | 'down') {
+  return (view: EditorView): boolean => {
+    console.log(`${logPrefix} keymap: Page ${dir}`);
+    const ctx = getActiveCellContext(view);
+    if (!ctx) return false;
+    
+    const { from, row, col, rowCount } = ctx;
+    
+    if (dir === 'up') {
+      const targetRow = 0; // First data row
+      if (rowCount === 0) return false; // データ行がない
+      if (row === null || row === targetRow) {
+         console.log(`${logPrefix} keymap: Page ${dir} (At top)`);
+         return false; // 既に一番上 (ヘッダー or 1行目)
+      }
+      focusCell(view, from, targetRow, col);
+    } else {
+      const targetRow = rowCount - 1; // Last data row
+      if (targetRow < 0) return false; // データ行がない
+      if (row === targetRow) {
+        console.log(`${logPrefix} keymap: Page ${dir} (At bottom)`);
+        return false; // 既に一番下
+      }
+      focusCell(view, from, targetRow, col);
+    }
+    return true;
+  };
+}
+
+
 // (v10)
 function copySelectionTSV(view: EditorView): boolean {
   // TODO: 矩形選択
+  // ★ (v23) ログ復活
   console.log(`${logPrefix} keymap: Mod-c (Not implemented)`);
   return false;
 }
 
 // (v19 の tableKeymap: Enter を削除)
+// ★★★ (v23) 修正: PgUp/PgDn を追加 ★★★
 export const tableKeymap = keymap.of([
   { key: 'ArrowLeft', run: moveHorizontal('left') },
   { key: 'ArrowRight', run: moveHorizontal('right') },
   { key: 'ArrowUp', run: moveVertical('up') },
   { key: 'ArrowDown', run: moveVertical('down') },
-  // { key: 'Enter', run: cmdEnter }, // ★ (v19) 削除
+  // { key: 'Enter', run: cmdEnter }, // ★ (v19) 削除 (buildCell の keydown で処理)
+  { key: 'PageUp', run: moveVerticalPage('up') },
+  { key: 'PageDown', run: moveVerticalPage('down') },
   { key: 'Tab', run: cmdTab },
   { key: 'Shift-Tab', run: cmdShiftTab }, 
   { key: 'Mod-c', run: copySelectionTSV },
