@@ -602,79 +602,157 @@ class TableWidget extends WidgetType {
       commit(); 
     });
 
-    el.addEventListener('input', () => {
-      // noop
-    });
-    
-    // ★★★ (v25) 修正: keydown リスナー (編集キーの伝播を停止) ★★★
+    // ★★★ (v27) 修正: keydown リスナー (ナビゲーションロジックをすべてここに集約) ★★★
     el.addEventListener('keydown', (e) => {
-      
-      // 1. Keys handled by tableKeymap (Arrows, Tab, PgUp/Dn, Mod-c)
-      // We must let these propagate to CodeMirror
-      const isNavKey = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'PageUp', 'PageDown'].includes(e.key);
-      const isCopy = (e.metaKey || e.ctrlKey) && e.key === 'c';
+      const key = e.key;
+      const isMod = e.metaKey || e.ctrlKey;
 
-      if (isNavKey || isCopy) {
-        console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key} (Passing to tableKeymap)`);
-        return; // ★ Let event propagate
+      // --- 1. Pass-through keys (Let CM handle) ---
+      // (Mod-c は tableKeymap で処理させる)
+      const isCopy = isMod && key === 'c';
+      if (isCopy) {
+          console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${key} (Passing to tableKeymap/CM)`);
+          return; // ★ Let event propagate
       }
 
-      // 2. Enter key (handled here)
-      if (e.key === 'Enter') {
-        e.preventDefault(); // ★ Prevent default (newline)
-        e.stopPropagation(); // ★ Stop propagation
-        console.log(`${logPrefix} KEYDOWN: Enter. Handling move/add row...`);
-
-        const container = getTableWidgetContainer(el);
-        if (!container) return;
-        
-        const from = parseInt(container.dataset.from!, 10);
-        const rowCount = parseInt(container.dataset.rowCount!, 10);
-        const colCount = parseInt(container.dataset.colCount!, 10);
-        
-        const rc = getCellRC(el); 
-        if (!rc) return;
-
-        const currentRow = rc.row;
-        const currentCol = rc.col;
-
-        // ★ (v23) Commit current cell *before* moving
-        commit();
-
-        // ★ (v23) Fix 1: Enter on header (currentRow == null) moves to row 0
-        if (currentRow == null) {
-            console.log(`${logPrefix} KEYDOWN: Enter (Header) -> Move to row 0`);
-            this.focusCellAt(view, from, 0, currentCol);
-            return;
-        }
-
-        // (v19) Existing logic for data rows
-        if (currentRow < rowCount - 1) {
-            // ★ Not last row -> move to next row
-            const nextRow = currentRow + 1;
-            console.log(`${logPrefix} KEYDOWN: Enter (Data Row) -> Move to next row (${nextRow}, ${currentCol})`);
-            this.focusCellAt(view, from, nextRow, currentCol);
-        } else {
-            // ★ Last row -> add new row
-            console.log(`${logPrefix} KEYDOWN: Enter (End of table) -> Add row`);
-            const block = this.getBlockAtFrom(view.state, from) ?? this.block;
-            const newRow = Array(colCount).fill('');
-            const updated: TableBlock = { ...block, rows: [...block.rows, newRow] };
-            
-            this.dispatchReplace(view, updated, (latestFrom) => {
-                const newRowIndex = rowCount; 
-                console.log(`${logPrefix} KEYDOWN: Enter (Add row) -> Focusing new row (${newRowIndex}, ${currentCol})`);
-                this.focusCellAt(view, latestFrom ?? from, newRowIndex, currentCol);
-            });
-        }
-        return;
-      }
+      // --- 2. Editing keys (Handled by contentEditable) ---
+      const isNavKey = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'PageUp', 'PageDown', 'Home', 'End', 'Enter'].includes(key);
       
-      // 3. ALL OTHER KEYS (Backspace, Delete, letters, Mod-v, Mod-x, etc.)
-      // Handled by contentEditable. Stop propagation to prevent CM handling.
-      console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${e.key} (Handling as contentEditable input, STOPPING propagation)`);
-      e.stopPropagation(); // ★★★ STOP PROPAGATION
+      if (!isNavKey) {
+          // This is Backspace, Delete, letter, Mod-v, Mod-x, etc.
+          console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${key} (Handling as contentEditable input, STOPPING propagation)`);
+          e.stopPropagation(); // Stop CM from handling it
+          return; // Let contentEditable handle it
+      }
+
+      // --- 3. Navigation/Action keys (Handled by us) ---
+      
+      e.preventDefault(); // Prevent default (e.g., newline, tab, page scroll)
+      e.stopPropagation(); // Stop CM from handling it (it won't reach tableKeymap)
+      
+      console.log(`${logPrefix} KEYDOWN (row: ${row}, col: ${col}): ${key} (Handling navigation)`);
+
+      // Get context
+      const container = getTableWidgetContainer(el);
+      if (!container) return;
+      
+      const from = parseInt(container.dataset.from!, 10);
+      const rowCount = parseInt(container.dataset.rowCount!, 10);
+      const colCount = parseInt(container.dataset.colCount!, 10);
+      
+      const currentBlock = this.getBlockAtFrom(view.state, from) ?? this.block;
+
+      // --- Find Target Cell ---
+      let targetRow: number | null = row; // (row is null for header)
+      let targetCol: number = col;
+
+      switch (key) {
+          case 'Enter':
+              commit(); // Commit first
+              if (row == null) { // Header
+                  targetRow = 0;
+              } else if (row < rowCount - 1) { // Data row
+                  targetRow = row + 1;
+              } else { // Last data row
+                  // Add new row (v19 logic)
+                  console.log(`${logPrefix} KEYDOWN: Enter (End of table) -> Add row`);
+                  const newRow = Array(colCount).fill('');
+                  const updated: TableBlock = { ...currentBlock, rows: [...currentBlock.rows, newRow] };
+                  
+                  this.dispatchReplace(view, updated, (latestFrom) => {
+                      const newRowIndex = rowCount; 
+                      console.log(`${logPrefix} KEYDOWN: Enter (Add row) -> Focusing new row (${newRowIndex}, ${col})`);
+                      this.focusCellAt(view, latestFrom ?? from, newRowIndex, col);
+                  });
+                  return; // focusCellAt is called in callback
+              }
+              break;
+          
+          case 'ArrowUp':
+              if (row == null) return; // At header
+              if (row === 0) targetRow = null; // 0 -> header
+              else if (row > 0) targetRow = row - 1;
+              else return; // At header (v23)
+              break;
+          case 'ArrowDown':
+              if (row == null) targetRow = 0; // header -> 0
+              else if (row < rowCount - 1) targetRow = row + 1;
+              else return; // At last row
+              break;
+          case 'ArrowLeft':
+              // TODO: Check cursor position? (Future)
+              if (col > 0) targetCol = col - 1;
+              else return; // At col 0
+              break;
+          case 'ArrowRight':
+              // TODO: Check cursor position? (Future)
+              if (col < colCount - 1) targetCol = col + 1;
+              else return; // At last col
+              break;
+          
+          case 'Tab':
+              if (e.shiftKey) { // Shift+Tab
+                  if (col > 0) {
+                      targetCol = col - 1;
+                  } else if (row != null && row > 0) { // Data row (not first)
+                      targetRow = row - 1;
+                      targetCol = colCount - 1;
+                  } else if (row === 0) { // First data row
+                      targetRow = null; // To header
+                      targetCol = colCount - 1;
+                  } else {
+                     // At header, col 0. Let CM blur.
+                     console.log(`${logPrefix} KEYDOWN: Shift+Tab (Start of table). Blurring.`);
+                     el.blur(); // (v27) Manually blur
+                     return; 
+                  }
+              } else { // Tab
+                  if (col < colCount - 1) {
+                      targetCol = col + 1;
+                  } else if (row == null) { // Header
+                      targetRow = 0;
+                      targetCol = 0;
+                  } else if (row < rowCount - 1) { // Data row (not last)
+                      targetRow = row + 1;
+                      targetCol = 0;
+                  } else {
+                      // At last cell. Let CM blur.
+                      console.log(`${logPrefix} KEYDOWN: Tab (End of table). Blurring.`);
+                      el.blur(); // (v27) Manually blur
+                      return; 
+                  }
+              }
+              break;
+
+          case 'PageUp':
+              if (rowCount === 0) return;
+              if (row === 0 || row == null) return; // At top
+              targetRow = 0;
+              break;
+          case 'PageDown':
+              if (rowCount === 0 || rowCount === 1) return;
+              const lastDataRow = rowCount - 1;
+              if (row === lastDataRow) return; // At bottom
+              targetRow = lastDataRow;
+              break;
+          
+          case 'Home':
+              if (col === 0) return; // At start
+              targetCol = 0;
+              break;
+          case 'End':
+              if (col === colCount - 1) return; // At end
+              targetCol = colCount - 1;
+              break;
+
+          default:
+              return; // Should not happen
+      }
+
+      // --- Execute Focus ---
+      this.focusCellAt(view, from, targetRow, targetCol);
     });
+
 
     // (v14 の mousedown リスナー)
     el.addEventListener('mousedown', (e) => {
@@ -1071,6 +1149,35 @@ function moveVerticalPage(dir: 'up' | 'down') {
   };
 }
 
+// ★★★ (v26) 新規: Home/End のための関数 ★★★
+function moveHorizontalPage(dir: 'home' | 'end') {
+  return (view: EditorView): boolean => {
+    console.log(`${logPrefix} keymap: ${dir === 'home' ? 'Home' : 'End'}`);
+    const ctx = getActiveCellContext(view);
+    if (!ctx) return false;
+    
+    const { from, row, col, colCount } = ctx;
+    
+    let targetCol: number;
+    if (dir === 'home') {
+      if (col === 0) {
+        console.log(`${logPrefix} keymap: Home (At start)`);
+        return false; // 既に一番左
+      }
+      targetCol = 0;
+    } else { // 'end'
+      if (col === colCount - 1) {
+        console.log(`${logPrefix} keymap: End (At end)`);
+        return false; // 既に一番右
+      }
+      targetCol = colCount - 1;
+    }
+    
+    focusCell(view, from, row, targetCol);
+    return true;
+  };
+}
+
 
 // (v10)
 function copySelectionTSV(view: EditorView): boolean {
@@ -1081,7 +1188,7 @@ function copySelectionTSV(view: EditorView): boolean {
 }
 
 // (v19 の tableKeymap: Enter を削除)
-// ★★★ (v23) 修正: PgUp/PgDn を追加 ★★★
+// ★★★ (v26) 修正: Home/End を追加 ★★★
 export const tableKeymap = keymap.of([
   { key: 'ArrowLeft', run: moveHorizontal('left') },
   { key: 'ArrowRight', run: moveHorizontal('right') },
@@ -1090,6 +1197,8 @@ export const tableKeymap = keymap.of([
   // { key: 'Enter', run: cmdEnter }, // ★ (v19) 削除 (buildCell の keydown で処理)
   { key: 'PageUp', run: moveVerticalPage('up') },
   { key: 'PageDown', run: moveVerticalPage('down') },
+  { key: 'Home', run: moveHorizontalPage('home') },
+  { key: 'End', run: moveHorizontalPage('end') },
   { key: 'Tab', run: cmdTab },
   { key: 'Shift-Tab', run: cmdShiftTab }, 
   { key: 'Mod-c', run: copySelectionTSV },
