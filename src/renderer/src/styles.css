@@ -57,7 +57,7 @@ html, body, #root {
   background: #ffffff;
 }
 
-/* ★ (v20) テーブルリサイズハンドル */
+/* テーブルリサイズハンドル */
 .cm-table-resizer {
   position: absolute;
   top: 0;
@@ -66,10 +66,9 @@ html, body, #root {
   height: 100%;
   cursor: col-resize;
   z-index: 10;
-  /* background-color: rgba(0, 100, 255, 0.1); */ /* デバッグ用 */
 }
 
-/* ★ (v20) リサイズ中のテキスト選択を無効化 */
+/* リサイズ中のテキスト選択を無効化 */
 body.cm-table-resizing {
   user-select: none;
   -webkit-user-select: none;
@@ -77,4 +76,17 @@ body.cm-table-resizing {
 .cm-table-resizing .cm-editor {
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* ★ 行・列選択時のハイライト */
+.cm-table-selected {
+  background-color: rgba(0, 120, 255, 0.2) !important;
+}
+
+/* 選択モード時のカーソルスタイル (JSで動的に制御するが補助的に) */
+.cm-col-select-cursor {
+  cursor: s-resize !important; /* 下矢印 */
+}
+.cm-row-select-cursor {
+  cursor: e-resize !important; /* 右矢印 */
 }
