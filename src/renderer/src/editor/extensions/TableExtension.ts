@@ -15,17 +15,13 @@ import {
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
-// ★★★ 強制ログ出力 ★★★
-console.log('%c TableExtension Loaded (Copy as Markdown) ', 'background: #8800ff; color: white; font-weight: bold;');
+console.log('%c TableExtension Loaded (Paste Friendly) ', 'background: #0055ff; color: white; font-weight: bold;');
 
-// ---- デバッグ設定 ----
 const logPrefix = '[TableExt]';
 function log(msg: string, ...args: any[]) {
   const DEBUG = true;
-  if (DEBUG) console.log(`%c${logPrefix} ${msg}`, 'color: #00d1b2; font-weight: bold;', ...args);
+  if (DEBUG) console.log(`%c${logPrefix}`, 'color: #00d1b2; font-weight: bold;', msg, ...args);
 }
-
-// ---- Types and Helpers ----
 
 type Align = 'left' | 'right' | 'center' | null;
 
@@ -38,8 +34,11 @@ interface TableBlock {
 }
 
 type SelectionState = {
-  rows: Set<number>;
-  cols: Set<number>;
+  type: 'col' | 'row' | 'rect' | 'none';
+  anchor: { row: number | null; col: number } | null;
+  head: { row: number | null; col: number } | null;
+  selectedRows: Set<number>;
+  selectedCols: Set<number>;
 };
 
 export const updateColWidthEffect = StateEffect.define<{ from: number; widths: number[] }>();
@@ -67,68 +66,82 @@ export const colWidthsField = StateField.define<{ [from: number]: number[] }>({
   }
 });
 
-// Markdownテーブル文字列を生成する関数（部分抽出対応）
+// 文字幅計算
+function getWidth(str: string): number {
+  let width = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if ((c >= 0x00 && c < 0x81) || (c === 0xf8f0) || (c >= 0xff61 && c < 0xffa0) || (c >= 0xf8f1 && c < 0xf8f4)) {
+      width += 1;
+    } else {
+      width += 2;
+    }
+  }
+  return width;
+}
+
+// 右埋めパディング
+function padRight(str: string, len: number): string {
+  const w = getWidth(str);
+  if (w >= len) return str;
+  return str + ' '.repeat(len - w);
+}
+
+// Markdown生成 (Pretty Print)
 function serializeTable(
   headers: string[], 
   aligns: Align[], 
   rows: string[][]
 ): string {
   const escape = (s: string) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+  
+  if (headers.length === 0 && rows.length === 0) return '';
 
-  // 列ごとの最大文字幅を計算（整形用）
-  // ※ 必須ではないが、Markdownソースが見やすくなる
   const colCount = headers.length;
   const colWidths = new Array(colCount).fill(0);
-  
-  const measure = (s: string) => { // 全角文字を2文字分としてカウントする簡易実装
-    let len = 0;
-    for (let i=0; i<s.length; i++) {
-        len += (s.charCodeAt(i) > 255) ? 2 : 1;
-    }
-    return len;
-  };
 
-  // ヘッダー幅
-  headers.forEach((h, i) => colWidths[i] = Math.max(colWidths[i], measure(escape(h))));
-  // データ幅
-  rows.forEach(row => {
-      row.forEach((cell, i) => {
-          if (i < colCount) colWidths[i] = Math.max(colWidths[i], measure(escape(cell)));
-      });
+  headers.forEach((h, i) => {
+    colWidths[i] = Math.max(colWidths[i], getWidth(escape(h)));
   });
-  // 区切り行の幅 (最低3文字)
-  for(let i=0; i<colCount; i++) colWidths[i] = Math.max(colWidths[i], 3);
+  
+  rows.forEach(row => {
+    row.forEach((cell, i) => {
+      if (i < colCount) {
+        colWidths[i] = Math.max(colWidths[i], getWidth(escape(cell)));
+      }
+    });
+  });
 
-  const pad = (s: string, width: number, align: Align) => {
-     const len = measure(s);
-     const padding = Math.max(0, width - len);
-     // 簡易的に後ろにスペースを足す（左揃え前提）
-     // 本格的な整形は複雑になるので、最低限スペース1つは確保するスタイルで
-     return s; 
+  for(let i=0; i<colCount; i++) {
+    colWidths[i] = Math.max(colWidths[i], 3); 
+  }
+
+  const resultLines: string[] = [];
+
+  const formatLine = (cells: string[]) => {
+    return '| ' + cells.map((c, i) => padRight(c, colWidths[i])).join(' | ') + ' |';
   };
 
-  const lines: string[] = [];
-  
   // 1. Header
-  const headerLine = '| ' + headers.map((h, i) => escape(h)).join(' | ') + ' |';
-  lines.push(headerLine);
-
+  resultLines.push(formatLine(headers.map(escape)));
+  
   // 2. Delimiter
-  const delimLine = '| ' + aligns.map((a, i) => {
-      if (a === 'left') return ':---';
-      if (a === 'right') return '---:';
-      if (a === 'center') return ':---:';
-      return '---';
-  }).join(' | ') + ' |';
-  lines.push(delimLine);
-
+  const delimCells = aligns.map((a, i) => {
+    const w = colWidths[i];
+    if (a === 'left') return ':' + '-'.repeat(w - 1);
+    if (a === 'right') return '-'.repeat(w - 1) + ':';
+    if (a === 'center') return ':' + '-'.repeat(w - 2) + ':';
+    return '-'.repeat(w);
+  });
+  resultLines.push('| ' + delimCells.join(' | ') + ' |');
+  
   // 3. Rows
   rows.forEach(row => {
-      const rowLine = '| ' + row.map((cell, i) => escape(cell)).join(' | ') + ' |';
-      lines.push(rowLine);
+      const safeRow = Array.from({length: colCount}, (_, i) => row[i] ? escape(row[i]) : '');
+      resultLines.push(formatLine(safeRow));
   });
 
-  return lines.join('\n');
+  return resultLines.join('\n');
 }
 
 function parseTablesInDoc(state: EditorState): TableBlock[] {
@@ -200,12 +213,18 @@ function clamp(val: number, min: number, max: number) {
   return Math.max(min, Math.min(max, val));
 }
 
-// ---- Widget ----
 class TableWidget extends WidgetType {
   private container: HTMLElement | null = null;
   private isOpeningContextMenu = false;
   private isProgrammaticFocus = false;
-  private selection: SelectionState = { rows: new Set(), cols: new Set() };
+  private isDragging = false;
+  private selection: SelectionState = {
+      type: 'none',
+      anchor: null,
+      head: null,
+      selectedRows: new Set(),
+      selectedCols: new Set()
+  };
 
   constructor(private block: TableBlock, private widths: number[] | null) {
     super();
@@ -230,9 +249,7 @@ class TableWidget extends WidgetType {
   }
 
   ignoreEvent(event: Event): boolean {
-    if (event.type === 'copy') {
-        return true; // Widget内で処理する
-    }
+    if (event.type === 'copy') return true;
     return event.type !== 'keydown' && event.type !== 'keyup';
   }
 
@@ -247,9 +264,7 @@ class TableWidget extends WidgetType {
       const latestBlock = parseTablesInDoc(view.state).find(b => b.from === initialFrom);
       if (!latestBlock) return;
       
-      // 既存のシリアライズ処理を使用（全データ）
       const newText = serializeTable(updated.headers, updated.aligns, updated.rows);
-      
       const trSpec: TransactionSpec = {
         changes: { from: latestBlock.from, to: latestBlock.to, insert: newText }
       };
@@ -306,37 +321,50 @@ class TableWidget extends WidgetType {
 
   // ---- Selection Logic ----
   private clearSelection() {
-    if (this.selection.rows.size > 0 || this.selection.cols.size > 0) {
-      this.selection.rows.clear();
-      this.selection.cols.clear();
+    if (this.selection.type !== 'none') {
+      this.selection = {
+          type: 'none',
+          anchor: null,
+          head: null,
+          selectedRows: new Set(),
+          selectedCols: new Set()
+      };
       this.updateSelectionStyles();
     }
   }
 
-  private selectCol(colIndex: number, append = false) {
-    if (!append) {
-        this.selection.rows.clear();
-        this.selection.cols.clear();
-    }
-    if (this.selection.cols.has(colIndex)) {
-        this.selection.cols.delete(colIndex); 
-    } else {
-        this.selection.cols.add(colIndex);
-    }
-    this.updateSelectionStyles();
-  }
+  private updateSelectionRange() {
+      if (!this.selection.anchor || !this.selection.head) return;
+      const r1 = this.selection.anchor.row; 
+      const c1 = this.selection.anchor.col;
+      const r2 = this.selection.head.row;
+      const c2 = this.selection.head.col;
+      const rStart = (r1 === null ? -1 : r1);
+      const rEnd = (r2 === null ? -1 : r2);
+      const minR = Math.min(rStart, rEnd);
+      const maxR = Math.max(rStart, rEnd);
+      const minC = Math.min(c1, c2);
+      const maxC = Math.max(c1, c2);
 
-  private selectRow(rowIndex: number, append = false) {
-    if (!append) {
-        this.selection.rows.clear();
-        this.selection.cols.clear();
-    }
-    if (this.selection.rows.has(rowIndex)) {
-        this.selection.rows.delete(rowIndex);
-    } else {
-        this.selection.rows.add(rowIndex);
-    }
-    this.updateSelectionStyles();
+      this.selection.selectedRows.clear();
+      this.selection.selectedCols.clear();
+
+      if (this.selection.type === 'rect') {
+          for (let r = minR; r <= maxR; r++) this.selection.selectedRows.add(r);
+          for (let c = minC; c <= maxC; c++) this.selection.selectedCols.add(c);
+      } 
+      else if (this.selection.type === 'row') {
+          const colCount = Math.max(this.block.headers.length, ...this.block.rows.map(r => r.length));
+          for (let c = 0; c < colCount; c++) this.selection.selectedCols.add(c);
+          for (let r = minR; r <= maxR; r++) this.selection.selectedRows.add(r);
+      }
+      else if (this.selection.type === 'col') {
+          const rowCount = this.block.rows.length;
+          this.selection.selectedRows.add(-1); 
+          for (let r = 0; r < rowCount; r++) this.selection.selectedRows.add(r);
+          for (let c = minC; c <= maxC; c++) this.selection.selectedCols.add(c);
+      }
+      this.updateSelectionStyles();
   }
 
   private updateSelectionStyles() {
@@ -350,8 +378,11 @@ class TableWidget extends WidgetType {
       const bodyRowIndex = isHeader ? -1 : tr.rowIndex - theadRowCount;
       Array.from(tr.cells).forEach((cell, cIdx) => {
         let selected = false;
-        if (this.selection.cols.has(cIdx)) selected = true;
-        if (bodyRowIndex >= 0 && this.selection.rows.has(bodyRowIndex)) selected = true;
+        if (this.selection.type === 'rect') {
+            if (this.selection.selectedRows.has(bodyRowIndex) && this.selection.selectedCols.has(cIdx)) selected = true;
+        } else {
+            if (this.selection.selectedRows.has(bodyRowIndex) && this.selection.selectedCols.has(cIdx)) selected = true;
+        }
         if (selected) {
             cell.classList.add('cm-table-selected');
         } else {
@@ -361,29 +392,37 @@ class TableWidget extends WidgetType {
     });
   }
 
-  private getMouseAction(e: MouseEvent, debug: boolean = false): { type: 'col' | 'row' | null; index: number } {
+  private startSelection(rc: { row: number | null; col: number }, type: 'col' | 'row' | 'rect') {
+      this.selection.type = type;
+      this.selection.anchor = rc;
+      this.selection.head = rc;
+      this.isDragging = true;
+      this.updateSelectionRange();
+  }
+
+  private updateDrag(rc: { row: number | null; col: number }) {
+      if (!this.isDragging || this.selection.type === 'none') return;
+      if (this.selection.head?.row !== rc.row || this.selection.head?.col !== rc.col) {
+          this.selection.head = rc;
+          this.updateSelectionRange();
+      }
+  }
+
+  private getMouseAction(e: MouseEvent, debug: boolean = false): { type: 'col' | 'row' | 'cell' | null; index: number; rc: {row: number|null, col: number} | null } {
     const target = e.target as HTMLElement;
     const targetCell = target.closest('th, td') as HTMLElement | null;
-    
-    if (!targetCell) return { type: null, index: -1 };
-
+    if (!targetCell) return { type: null, index: -1, rc: null };
     const rect = targetCell.getBoundingClientRect();
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
     const rc = getCellRC(targetCell);
-    if (!rc) return { type: null, index: -1 };
+    if (!rc) return { type: null, index: -1, rc: null };
 
-    if (debug) {
-       log(`Action Check: Tag=${targetCell.tagName} RC=${rc.row},${rc.col} Off=${offsetX.toFixed(0)},${offsetY.toFixed(0)}`);
-    }
-
-    // 1. 強制選択 (Ctrl/Cmd + Click)
     if (e.ctrlKey || e.metaKey) {
-        if (targetCell.tagName === 'TH') return { type: 'col', index: rc.col };
-        if (rc.row !== null) return { type: 'row', index: rc.row };
+        if (targetCell.tagName === 'TH') return { type: 'col', index: rc.col, rc };
+        if (rc.row !== null) return { type: 'row', index: rc.row, rc };
     }
     
-    // 2. エリア判定
     const isHeader = targetCell.tagName === 'TH';
     const isFirstCol = rc.col === 0;
     const COL_SELECT_EDGE = isHeader ? 20 : 10; 
@@ -391,130 +430,120 @@ class TableWidget extends WidgetType {
     const RESIZER_WIDTH = 8;
 
     if (offsetX > rect.width - RESIZER_WIDTH) {
-        return { type: null, index: -1 };
+        return { type: null, index: -1, rc: null };
     }
-
-    // 3. 列選択判定: 上端
     if (offsetY < COL_SELECT_EDGE) {
-        return { type: 'col', index: rc.col };
+        return { type: 'col', index: rc.col, rc };
     }
-
-    // 4. 行選択判定: 左端
     if (offsetX < ROW_SELECT_EDGE) {
         if (rc.row !== null) {
-            return { type: 'row', index: rc.row };
+            return { type: 'row', index: rc.row, rc };
         }
     }
-    
-    return { type: null, index: -1 };
+    return { type: 'cell', index: -1, rc };
   }
 
   private handleMouseMove = (e: MouseEvent) => {
     if (document.body.classList.contains('cm-table-resizing')) return;
+    if (this.isDragging) {
+        const target = e.target as HTMLElement;
+        const targetCell = target.closest('th, td') as HTMLElement | null;
+        if (targetCell) {
+            const rc = getCellRC(targetCell);
+            if (rc) {
+                this.updateDrag(rc);
+                e.preventDefault();
+            }
+        }
+        return;
+    }
     const target = e.target as HTMLElement;
     const targetCell = target.closest('th, td') as HTMLElement | null;
-    
     if (this.container) this.container.style.cursor = 'default';
     if (targetCell) targetCell.style.cursor = 'text';
-
     const action = this.getMouseAction(e, false);
-    if (action.type === 'col' && targetCell) {
-        targetCell.style.cursor = 's-resize'; 
-    } else if (action.type === 'row' && targetCell) {
-        targetCell.style.cursor = 'e-resize';
-    }
+    if (action.type === 'col' && targetCell) targetCell.style.cursor = 's-resize'; 
+    else if (action.type === 'row' && targetCell) targetCell.style.cursor = 'e-resize';
   }
 
-  private handleClick = (e: MouseEvent) => {
+  private handleMouseDown = (e: MouseEvent) => {
     if ((e.target as HTMLElement).classList.contains('cm-table-resizer')) return;
-
     const action = this.getMouseAction(e, true);
-    
-    if (action.type === 'col') {
-        log(`ACTION: Select Col ${action.index}`);
-        this.selectCol(action.index, e.shiftKey); 
+    const onMouseUp = () => {
+        this.isDragging = false;
+        window.removeEventListener('mouseup', onMouseUp);
+        this.container?.focus({ preventScroll: true });
+    };
+    window.addEventListener('mouseup', onMouseUp);
+
+    if (action.type === 'col' && action.rc) {
+        this.startSelection(action.rc, 'col');
         e.preventDefault();
         e.stopPropagation();
         this.container?.focus({ preventScroll: true });
-        return;
-    } else if (action.type === 'row') {
-        log(`ACTION: Select Row ${action.index}`);
-        this.selectRow(action.index, e.shiftKey);
+    } else if (action.type === 'row' && action.rc) {
+        this.startSelection(action.rc, 'row');
         e.preventDefault();
         e.stopPropagation();
         this.container?.focus({ preventScroll: true });
-        return;
-    }
-    
-    if (!e.ctrlKey && !e.metaKey) {
+    } else if (action.type === 'cell' && action.rc) {
+        this.startSelection(action.rc, 'rect');
+    } else {
         this.clearSelection();
     }
   }
 
-  // ★ データコピー処理（Markdown Tableとしてコピー）
+  // ★ コピー処理: 
   private performCopy = (view: EditorView) => {
-      log('performCopy: Start');
-      
-      if (this.selection.rows.size === 0 && this.selection.cols.size === 0) {
-          log('performCopy: No selection.');
-          return;
-      }
-      
+      if (this.selection.type === 'none' || this.selection.selectedRows.size === 0) return;
       const currentBlock = this.getBlockAtFrom(view.state, this.block.from);
-      if (!currentBlock) {
-          console.error('performCopy: Could not find current block');
-          return;
-      }
+      if (!currentBlock) return;
 
-      // 1. 対象の行・列インデックスを決定
-      let targetRows: number[] = [];
-      let targetCols: number[] = [];
-      const rowCount = currentBlock.rows.length;
-      const colCount = Math.max(currentBlock.headers.length, ...currentBlock.rows.map(r => r.length));
+      const targetRows = Array.from(this.selection.selectedRows).sort((a, b) => a - b);
+      const targetCols = Array.from(this.selection.selectedCols).sort((a, b) => a - b);
 
-      if (this.selection.rows.size > 0) {
-          for (let r = 0; r < rowCount; r++) if (this.selection.rows.has(r)) targetRows.push(r);
-      } else {
-          // 行選択なし＝全行対象（列選択モード）
-          for (let r = 0; r < rowCount; r++) targetRows.push(r);
-      }
+      const safeHeaders = currentBlock.headers || [];
+      const safeAligns = currentBlock.aligns || [];
+      const safeRows = currentBlock.rows || [];
 
-      if (this.selection.cols.size > 0) {
-          for (let c = 0; c < colCount; c++) if (this.selection.cols.has(c)) targetCols.push(c);
-      } else {
-          // 列選択なし＝全列対象（行選択モード）
-          for (let c = 0; c < colCount; c++) targetCols.push(c);
-      }
-
-      targetRows.sort((a, b) => a - b);
-      targetCols.sort((a, b) => a - b);
-
-      // 2. 選択範囲に基づいてデータを抽出
-      const extractCols = (row: string[]) => targetCols.map(c => row[c] ?? '');
-
-      // ヘッダーの抽出
-      const newHeaders = extractCols(currentBlock.headers);
+      // 元のヘッダー行(-1)が含まれているか
+      const hasOriginalHeader = targetRows.includes(-1);
+      const dataRowsIndices = targetRows.filter(r => r >= 0);
       
-      // Alignの抽出 (Align配列はインデックスアクセス可能とする)
-      const newAligns = targetCols.map(c => currentBlock.aligns[c] ?? null);
+      const extractCols = (row: string[]) => targetCols.map(c => row && row[c] ? row[c] : '');
 
-      // データ行の抽出
-      const newRows = targetRows.map(r => extractCols(currentBlock.rows[r]));
+      const newAligns = targetCols.map(c => safeAligns[c] ?? null);
 
-      // 3. Markdown形式にシリアライズ
-      const markdownTable = serializeTable(newHeaders, newAligns, newRows);
+      let newRows = dataRowsIndices.map(r => extractCols(safeRows[r]));
+      let newHeaders: string[] = [];
+
+      if (hasOriginalHeader) {
+          // ヘッダーありの場合
+          newHeaders = extractCols(safeHeaders);
+      } else if (newRows.length > 0) {
+          // ヘッダーなしの場合、1行目をヘッダーに昇格
+          newHeaders = newRows[0];
+          newRows = newRows.slice(1);
+      } else {
+          newHeaders = targetCols.map(() => '');
+      }
+
+      // Markdownテキスト生成 (Pretty Print)
+      let markdownTable = serializeTable(newHeaders, newAligns, newRows);
       
-      // 4. クリップボードへ書き込み
-      navigator.clipboard.writeText(markdownTable).then(() => {
-          log(`performCopy: Copied as Markdown Table (${newRows.length} rows)`);
-          log('Copied text:\n', markdownTable);
-      }).catch(err => {
+      // ★ 修正: 前後に改行を追加して、ペースト時の結合を防ぐ
+      markdownTable = '\n' + markdownTable + '\n';
+
+      log('performCopy: Writing Transformed Markdown...');
+      log('MD Content:\n', markdownTable);
+
+      navigator.clipboard.writeText(markdownTable).catch(err => {
           console.error('performCopy: Failed to write to clipboard', err);
       });
   }
 
   private handleCopyEvent = (e: ClipboardEvent, view: EditorView) => {
-      if (this.selection.rows.size === 0 && this.selection.cols.size === 0) return;
+      if (this.selection.type === 'none') return;
       e.preventDefault();
       e.stopPropagation();
       this.performCopy(view);
@@ -522,22 +551,20 @@ class TableWidget extends WidgetType {
 
   private handleKeyDown = (e: KeyboardEvent, view: EditorView) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-          if (this.selection.rows.size > 0 || this.selection.cols.size > 0) {
-              log('handleKeyDown: Ctrl+C detected, forcing copy.');
+          if (this.selection.type !== 'none') {
               e.preventDefault();
               e.stopPropagation();
               this.performCopy(view);
           }
       }
-      if (e.key === 'Enter') {
-        // 既存のセル内Enter処理に任せる
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
+          this.clearSelection();
       }
   }
 
   toDOM(view: EditorView): HTMLElement {
     const container = document.createElement('div');
     this.container = container; 
-    
     container.className = 'cm-md-table-widget';
     container.style.padding = '4px';
     container.style.border = '1px dashed #ddd';
@@ -549,8 +576,7 @@ class TableWidget extends WidgetType {
     container.style.outline = 'none'; 
     
     container.addEventListener('mousemove', this.handleMouseMove);
-    container.addEventListener('mousedown', this.handleClick); 
-    
+    container.addEventListener('mousedown', this.handleMouseDown); 
     container.addEventListener('copy', (e) => this.handleCopyEvent(e, view));
     container.addEventListener('keydown', (e) => this.handleKeyDown(e, view));
 
@@ -565,28 +591,21 @@ class TableWidget extends WidgetType {
       this.block.aligns.length,
       ...this.block.rows.map(r => r.length)
     );
-    
     container.dataset.from = this.block.from.toString();
     container.dataset.colCount = colCount.toString();
     container.dataset.rowCount = this.block.rows.length.toString();
-
     const colgroup = document.createElement('colgroup');
     for (let i = 0; i < colCount; i++) {
         const colEl = document.createElement('col');
-        if (this.widths && this.widths[i]) {
-            colEl.style.width = `${this.widths[i]}px`;
-        }
+        if (this.widths && this.widths[i]) colEl.style.width = `${this.widths[i]}px`;
         colgroup.appendChild(colEl);
     }
     table.appendChild(colgroup);
-
     const thead = document.createElement('thead');
     const trh = document.createElement('tr');
     trh.style.backgroundColor = '#f8f8f8';
-
     const headers = Array.from({ length: colCount }, (_, i) => this.block.headers[i] ?? '');
     const aligns = Array.from({ length: colCount }, (_, i) => this.block.aligns[i] ?? null);
-
     headers.forEach((text, col) => {
       const th = this.buildCell('th', text, col, null, aligns[col] ?? null, (val) => {
         const currentBlock = this.getBlockAtFrom(view.state, this.block.from) ?? this.block;
@@ -599,7 +618,6 @@ class TableWidget extends WidgetType {
       trh.appendChild(th);
     });
     thead.appendChild(trh);
-
     const tbody = document.createElement('tbody');
     this.block.rows.forEach((row, rIdx) => {
       const tr = document.createElement('tr');
@@ -617,16 +635,14 @@ class TableWidget extends WidgetType {
       }
       tbody.appendChild(tr);
     });
-
     table.appendChild(thead);
     table.appendChild(tbody);
     container.appendChild(table);
-    
     setTimeout(() => this.updateSelectionStyles(), 0);
-
     return container;
   }
 
+  // ... (以下省略なし)
   private createResizer(view: EditorView, th: HTMLTableCellElement, colIndex: number) {
       const resizer = document.createElement('div');
       resizer.className = 'cm-table-resizer';
@@ -641,9 +657,7 @@ class TableWidget extends WidgetType {
           if (!colgroup) return;
           const cols = Array.from(colgroup.children) as HTMLTableColElement[];
           const currentWidths = cols.map(c => c.offsetWidth);
-          for (let i = 0; i < cols.length; i++) {
-              cols[i].style.width = `${currentWidths[i]}px`;
-          }
+          for (let i = 0; i < cols.length; i++) cols[i].style.width = `${currentWidths[i]}px`;
           const startX = e.clientX;
           const startWidth = currentWidths[colIndex]; 
           table.style.tableLayout = 'fixed';
@@ -669,7 +683,6 @@ class TableWidget extends WidgetType {
       });
       return resizer;
   }
-
   private buildCell = (
     tag: 'th' | 'td',
     text: string,
@@ -689,17 +702,14 @@ class TableWidget extends WidgetType {
     el.style.backgroundColor = tag === 'th' ? '#f0f0f0' : '#ffffff';
     el.style.position = 'relative';
     el.style.outline = 'none';
-
     if (tag === 'th') {
         const resizer = this.createResizer(view, el, col);
         el.appendChild(resizer);
     }
-
     el.addEventListener('focus', () => {
       el.style.boxShadow = 'inset 0 0 0 2px #007bff';
       this.isProgrammaticFocus = false;
     });
-    
     const extractValue = () => (el.textContent ?? '').replace(/\r?\n/g, ' ');
     const commit = () => {
       const latestBlock = this.getBlockAtFrom(view.state, this.block.from);
@@ -709,7 +719,6 @@ class TableWidget extends WidgetType {
       if (currentValue === newValue) return;
       updateValue(newValue);
     }
-    
     el.addEventListener('blur', (e: FocusEvent) => {
       el.style.boxShadow = 'none';
       if (this.isProgrammaticFocus) return; 
@@ -723,7 +732,6 @@ class TableWidget extends WidgetType {
       if (!el.isConnected) return; 
       commit(); 
     });
-
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -755,26 +763,8 @@ class TableWidget extends WidgetType {
           this.clearSelection();
       }
     });
-    el.addEventListener('mousedown', (e) => {
-      if (e.button === 0) {
-        this.isOpeningContextMenu = false;
-      }
-    });
-    el.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      this.isOpeningContextMenu = true;
-      const container = getTableWidgetContainer(el);
-      if (!container) return;
-      const rc = getCellRC(el);
-      if (!rc) return;
-      this.showContextMenu(view, container, rc, e.clientX, e.clientY);
-    });
     return el;
   }
-
-  // ... (context menu / row-col ops 省略) ...
-  // 前回のコードと同じ内容を維持します
-  // (insertRow, deleteRow, insertCol, deleteCol, showContextMenu)
   private showContextMenu = (view: EditorView, container: HTMLElement, rc: { row: number | null; col: number }, x: number, y: number) => {
     container.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
     const menu = document.createElement('div');
@@ -790,7 +780,6 @@ class TableWidget extends WidgetType {
     menu.style.fontFamily = 'sans-serif';
     menu.style.fontSize = '14px';
     menu.style.minWidth = '120px';
-
     const mkItem = (label: string, cb: () => void, enabled = true) => {
       const it = document.createElement('div');
       it.style.padding = '4px 12px';
@@ -816,7 +805,6 @@ class TableWidget extends WidgetType {
       }
     };
     setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
-
     const rowOpsEnabled = rc.row != null;
     const colOpsEnabled = true;
     menu.appendChild(mkItem('上に行を挿入', () => this.insertRow(view, container, rc.col, rc.row!, 'above'), rowOpsEnabled));
@@ -899,8 +887,6 @@ class TableWidget extends WidgetType {
   }
 }
 
-// ---- Decorations & Keymap (Unchanged) ----
-
 function buildDecorations(state: EditorState): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const blocks = parseTablesInDoc(state); 
@@ -930,7 +916,7 @@ export const tableDecoField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f)
 });
 
-// ---- Keymap Helpers ----
+// Keymap helpers...
 function getActiveCellContext(view: EditorView) {
   const focused = view.hasFocus ? document.activeElement : null;
   if (!focused || (focused.tagName !== 'TH' && focused.tagName !== 'TD')) return null;
@@ -945,7 +931,6 @@ function getActiveCellContext(view: EditorView) {
   if (!block) return null;
   return { ...rc, from, colCount, rowCount, block, el: focused as HTMLElement };
 }
-
 function focusCell(view: EditorView, from: number, row: number | null, col: number) {
   const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
   if (!container) return;
@@ -972,7 +957,6 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
     }, 0);
   }
 }
-
 function cmdTab(view: EditorView): boolean {
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
