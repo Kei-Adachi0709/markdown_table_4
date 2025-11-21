@@ -15,12 +15,15 @@ import {
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
-console.log('%c TableExtension Loaded (Fixed v10: updateDOM & Polling Focus) ', 'background: #222; color: #00ff00; font-weight: bold;');
+console.log('%c TableExtension Loaded (Fixed v14: Fix Variable Typo) ', 'background: #006400; color: #fff; font-weight: bold; padding: 4px;');
 
 const logPrefix = '[TableExt]';
 function log(msg: string, ...args: any[]) {
-  const DEBUG = true;
-  if (DEBUG) console.log(`%c${logPrefix}`, 'color: #00d1b2; font-weight: bold;', msg, ...args);
+  console.log(`%c${logPrefix} ${new Date().toISOString().slice(11, 23)}`, 'color: #00d1b2; font-weight: bold;', msg, ...args);
+}
+
+function logError(msg: string, ...args: any[]) {
+  console.error(`%c${logPrefix} [ERROR]`, 'color: #ff4444; font-weight: bold;', msg, ...args);
 }
 
 type Align = 'left' | 'right' | 'center' | null;
@@ -209,6 +212,11 @@ function clamp(val: number, min: number, max: number) {
   return Math.max(min, Math.min(max, val));
 }
 
+function getFromFromContainer(container: HTMLElement | null): number | null {
+  if (!container || !container.dataset.from) return null;
+  return parseInt(container.dataset.from, 10);
+}
+
 class TableWidget extends WidgetType {
   private container: HTMLElement | null = null;
   private isOpeningContextMenu = false;
@@ -228,9 +236,6 @@ class TableWidget extends WidgetType {
 
   eq(other: WidgetType): boolean {
     const o = other as TableWidget;
-    // ※ eqがfalseを返すとtoDOMが呼ばれる。
-    // ここでは厳密に比較し、差分があれば再描画のチャンスを与えるが、
-    // 実際の更新は updateDOM でハンドリングしてDOM再利用を試みる。
     if (
       o.block.from !== this.block.from ||
       o.block.to !== this.block.to ||
@@ -238,7 +243,6 @@ class TableWidget extends WidgetType {
       o.block.rows.length !== this.block.rows.length
     ) return false;
 
-    // 内容の比較
     if (o.block.headers.join('|') !== this.block.headers.join('|')) return false;
     if (o.block.rows.map(r => r.join('|')).join('||') !== this.block.rows.map(r => r.join('|')).join('||')) return false;
 
@@ -251,11 +255,7 @@ class TableWidget extends WidgetType {
     return true;
   }
 
-  // ★ DOMを再利用するためのメソッド
   updateDOM(dom: HTMLElement, view: EditorView): boolean {
-    log('updateDOM called');
-    
-    // 1. 構造（行数・列数）が変わっている場合は再作成 (false)
     const oldRowCount = parseInt(dom.dataset.rowCount || '0', 10);
     const oldColCount = parseInt(dom.dataset.colCount || '0', 10);
     const newRowCount = this.block.rows.length;
@@ -265,12 +265,9 @@ class TableWidget extends WidgetType {
     );
 
     if (oldRowCount !== newRowCount || oldColCount !== newColCount) {
-        log(`updateDOM: Structure changed (Row: ${oldRowCount}->${newRowCount}, Col: ${oldColCount}->${newColCount}). Recreating.`);
-        return false; // 再作成
+        return false; 
     }
 
-    // 2. 構造が同じなら、中身のテキストだけ更新して true を返す
-    // これによりフォーカスが外れなくなる
     const table = dom.querySelector('table');
     if (!table) return false;
 
@@ -281,15 +278,8 @@ class TableWidget extends WidgetType {
         for (let i = 0; i < headerRow.cells.length; i++) {
             const cell = headerRow.cells[i];
             const newText = this.block.headers[i] ?? '';
-            // contentEditable なので textContent を更新するとカーソルが飛ぶ可能性があるが、
-            // 入力中のセル（フォーカスがあるセル）は更新しないようにする
             if (document.activeElement !== cell && cell.textContent !== newText) {
                 cell.textContent = newText;
-                // リサイザーを再追加する必要があるならここで処理（今回はCSS/JSで制御済み）
-                if (cell.tagName === 'TH' && !cell.querySelector('.cm-table-resizer')) {
-                     const resizer = this.createResizer(view, cell, i);
-                     cell.appendChild(resizer);
-                }
             }
         }
     }
@@ -309,13 +299,8 @@ class TableWidget extends WidgetType {
         }
     }
 
-    // データ属性の更新
     dom.dataset.from = this.block.from.toString();
-    
-    // インスタンス変数の引継ぎ（重要）
     this.container = dom;
-
-    log('updateDOM: Success (DOM reused)');
     return true;
   }
 
@@ -333,7 +318,6 @@ class TableWidget extends WidgetType {
         }
         return false;
     }
-    // ★ mousedown も true にして Widget 内での選択動作を守る
     if (event.type === 'mousedown') return true; 
     if (event.type === 'copy') return true;
     return true;
@@ -341,23 +325,24 @@ class TableWidget extends WidgetType {
 
   private dispatchReplace = (
     view: EditorView, 
+    originFrom: number,
     updated: TableBlock, 
     newWidths: number[] | null = null,
     after?: (latestFrom?: number) => void
   ) => {
-    log('dispatchReplace: Scheduled.');
+    log(`dispatchReplace: Scheduled. originFrom=${originFrom}`);
     setTimeout(() => {
-      const initialFrom = this.block.from;
+      const initialFrom = originFrom;
       const latestBlock = parseTablesInDoc(view.state).find(b => b.from === initialFrom);
       if (!latestBlock) {
-          log('dispatchReplace: Block not found. Aborting.');
+          logError(`dispatchReplace: Block not found at ${initialFrom}. Aborting.`);
           return;
       }
       
       const newText = serializeTable(updated.headers, updated.aligns, updated.rows);
       const changes = { from: latestBlock.from, to: latestBlock.to, insert: newText };
       
-      // 仮更新で位置計算
+      // ★ 修正箇所: 変数名のタイポを修正 (constKv_tempTr -> const tempTr)
       const tempTr = view.state.update({ changes });
       const newFrom = tempTr.changes.mapPos(latestBlock.from, 1);
       
@@ -368,11 +353,14 @@ class TableWidget extends WidgetType {
               : []
       };
       
+      log(`dispatchReplace: Dispatching changes... New From=${newFrom}`);
       view.dispatch(finalSpec);
       
       if (after) {
-          // 少し待ってから実行（DOM更新待ち）
-          requestAnimationFrame(() => after(newFrom ?? latestBlock.from));
+          requestAnimationFrame(() => {
+              log('dispatchReplace: Calling after callback');
+              after(newFrom ?? latestBlock.from);
+          });
       }
     }, 0); 
   }
@@ -380,12 +368,10 @@ class TableWidget extends WidgetType {
   public focusCellAt = (view: EditorView, from: number, row: number | null, col: number) => {
     log(`focusCellAt: Request focus -> from=${from}, row=${row}, col=${col}`);
     
-    // ★ ポーリングで要素を探す (最大10回リトライ)
     let retries = 0;
     const maxRetries = 10;
     
     const poll = () => {
-        // DOM上の最新のコンテナを探す
         const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
         
         if (container) {
@@ -395,7 +381,7 @@ class TableWidget extends WidgetType {
             if (retries < maxRetries) {
                 requestAnimationFrame(poll);
             } else {
-                log(`focusCellAt: Gave up searching for container [from=${from}]`);
+                logError(`focusCellAt: Gave up searching for container [from=${from}]`);
             }
         }
     };
@@ -413,13 +399,10 @@ class TableWidget extends WidgetType {
         }
 
         if (target) {
-          // プログラムによるフォーカスであることをフラグで管理
+          log(`focusCellAt: Focusing target cell ${target.tagName}`);
           this.isProgrammaticFocus = true;
-          
-          // 確実にフォーカス
           target.focus({ preventScroll: false });
           
-          // カーソルを末尾へ
           if (target.firstChild instanceof Text) {
             const s = window.getSelection();
             const r = document.createRange();
@@ -429,12 +412,9 @@ class TableWidget extends WidgetType {
             s?.addRange(r);
           }
           
-          // 画面外ならスクロール
           target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-          
-          log(`focusCellAt: Success! ActiveElement is ${document.activeElement?.tagName}`);
         } else {
-            log('focusCellAt: Target cell not found in container.');
+          logError(`focusCellAt: Target cell not found in DOM.`);
         }
   }
 
@@ -443,7 +423,7 @@ class TableWidget extends WidgetType {
     return blocks.find(b => b.from === from) ?? null;
   }
 
-  // ---- Selection Logic (省略なしで記述) ----
+  // ---- Selection Logic ----
   private clearSelection() {
     if (this.selection.type !== 'none') {
       this.selection = {
@@ -598,7 +578,9 @@ class TableWidget extends WidgetType {
     const onMouseUp = () => {
         this.isDragging = false;
         window.removeEventListener('mouseup', onMouseUp);
-        this.container?.focus({ preventScroll: true });
+        if (action.type !== 'cell') {
+            this.container?.focus({ preventScroll: true });
+        }
     };
     window.addEventListener('mouseup', onMouseUp);
 
@@ -620,8 +602,12 @@ class TableWidget extends WidgetType {
   }
 
   private performCopy = (view: EditorView) => {
+      if (!this.container) return;
+      const currentFrom = getFromFromContainer(this.container);
+      if (currentFrom === null) return;
+
       if (this.selection.type === 'none' || this.selection.selectedRows.size === 0) return;
-      const currentBlock = this.getBlockAtFrom(view.state, this.block.from);
+      const currentBlock = this.getBlockAtFrom(view.state, currentFrom);
       if (!currentBlock) return;
 
       const targetRows = Array.from(this.selection.selectedRows).sort((a, b) => a - b);
@@ -677,7 +663,6 @@ class TableWidget extends WidgetType {
   }
 
   toDOM(view: EditorView): HTMLElement {
-    log('toDOM called');
     const container = document.createElement('div');
     this.container = container; 
     container.className = 'cm-md-table-widget';
@@ -697,7 +682,6 @@ class TableWidget extends WidgetType {
 
     container.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        log('contextmenu triggered');
         const action = this.getMouseAction(e); 
         if (action.rc) {
             this.showContextMenu(view, container, action.rc, e.clientX, e.clientY);
@@ -718,6 +702,7 @@ class TableWidget extends WidgetType {
     container.dataset.from = this.block.from.toString();
     container.dataset.colCount = colCount.toString();
     container.dataset.rowCount = this.block.rows.length.toString();
+    
     const colgroup = document.createElement('colgroup');
     for (let i = 0; i < colCount; i++) {
         const colEl = document.createElement('col');
@@ -725,40 +710,46 @@ class TableWidget extends WidgetType {
         colgroup.appendChild(colEl);
     }
     table.appendChild(colgroup);
+    
     const thead = document.createElement('thead');
     const trh = document.createElement('tr');
     trh.style.backgroundColor = '#f8f8f8';
+    
     const headers = Array.from({ length: colCount }, (_, i) => this.block.headers[i] ?? '');
     const aligns = Array.from({ length: colCount }, (_, i) => this.block.aligns[i] ?? null);
+    
     headers.forEach((text, col) => {
-      const th = this.buildCell('th', text, col, null, aligns[col] ?? null, (val, after) => {
-        const currentBlock = this.getBlockAtFrom(view.state, this.block.from) ?? this.block;
+      const th = this.buildCell('th', text, col, null, aligns[col] ?? null, (val, after, currentFrom) => {
+        const currentBlock = this.getBlockAtFrom(view.state, currentFrom) ?? this.block;
         const newHeaders = headers.map((h, i) => (i === col ? val : h));
         const newAligns = aligns.slice();
         while(newAligns.length < newHeaders.length) newAligns.push(null);
         const updated: TableBlock = { ...currentBlock, headers: newHeaders, aligns: newAligns };
-        this.dispatchReplace(view, updated, null, (latestFrom) => {
-            if (after) after(latestFrom ?? this.block.from);
-            else this.focusCellAt(view, latestFrom ?? this.block.from, null, col);
+        
+        this.dispatchReplace(view, currentFrom, updated, null, (latestFrom) => {
+            if (after) after(latestFrom ?? currentFrom);
+            else this.focusCellAt(view, latestFrom ?? currentFrom, null, col);
         });
       }, view);
       trh.appendChild(th);
     });
     thead.appendChild(trh);
+    
     const tbody = document.createElement('tbody');
     this.block.rows.forEach((row, rIdx) => {
       const tr = document.createElement('tr');
       for (let c = 0; c < colCount; c++) {
-        const td = this.buildCell('td', row[c] ?? '', c, rIdx, aligns[c] ?? null, (val, after) => {
-          const currentBlock = this.getBlockAtFrom(view.state, this.block.from) ?? this.block;
+        const td = this.buildCell('td', row[c] ?? '', c, rIdx, aligns[c] ?? null, (val, after, currentFrom) => {
+          const currentBlock = this.getBlockAtFrom(view.state, currentFrom) ?? this.block;
           const newRows = currentBlock.rows.map((r, i) => (i === rIdx ? [...r] : r.slice()));
           if (!newRows[rIdx]) newRows[rIdx] = Array(colCount).fill('');
           while(newRows[rIdx].length < colCount) newRows[rIdx].push('');
           newRows[rIdx][c] = val;
           const updated: TableBlock = { ...currentBlock, rows: newRows };
-          this.dispatchReplace(view, updated, null, (latestFrom) => {
-            if (after) after(latestFrom ?? this.block.from);
-            else this.focusCellAt(view, latestFrom ?? this.block.from, rIdx, c);
+          
+          this.dispatchReplace(view, currentFrom, updated, null, (latestFrom) => {
+            if (after) after(latestFrom ?? currentFrom);
+            else this.focusCellAt(view, latestFrom ?? currentFrom, rIdx, c);
           });
         }, view);
         tr.appendChild(td);
@@ -779,30 +770,36 @@ class TableWidget extends WidgetType {
           if (e.button !== 0) return;
           e.preventDefault();
           e.stopPropagation();
-          if (!this.container) return;
-          const table = this.container.querySelector('table');
+          const container = getTableWidgetContainer(th);
+          if (!container) return;
+          
+          const table = container.querySelector('table');
           if (!table) return;
           const colgroup = table.querySelector('colgroup');
           if (!colgroup) return;
           const cols = Array.from(colgroup.children) as HTMLTableColElement[];
           const currentWidths = cols.map(c => c.offsetWidth);
           for (let i = 0; i < cols.length; i++) cols[i].style.width = `${currentWidths[i]}px`;
+          
           const startX = e.clientX;
           const startWidth = currentWidths[colIndex]; 
           table.style.tableLayout = 'fixed';
           table.style.width = 'auto';
           document.body.classList.add('cm-table-resizing'); 
+          
           const onMouseMove = (e: MouseEvent) => {
               const deltaX = e.clientX - startX;
               const newWidth = Math.max(50, startWidth + deltaX);
               cols[colIndex].style.width = `${newWidth}px`;
           };
+          
           const onMouseUp = () => {
               window.removeEventListener('mousemove', onMouseMove);
               window.removeEventListener('mouseup', onMouseUp);
               document.body.classList.remove('cm-table-resizing');
               const finalWidths = cols.map(c => c.offsetWidth);
-              const latestFrom = (this.getBlockAtFrom(view.state, this.block.from) ?? this.block).from;
+              const latestFrom = getFromFromContainer(container) ?? this.block.from;
+              
               view.dispatch({
                   effects: updateColWidthEffect.of({ from: latestFrom, widths: finalWidths })
               });
@@ -819,7 +816,7 @@ class TableWidget extends WidgetType {
     col: number,
     row: number | null,
     al: Align,
-    updateValue: (val: string, after?: (from: number) => void) => void,
+    updateValue: (val: string, after: ((from: number) => void) | undefined, currentFrom: number) => void,
     view: EditorView
   ) => {
     const el = document.createElement(tag);
@@ -840,14 +837,28 @@ class TableWidget extends WidgetType {
       el.style.boxShadow = 'inset 0 0 0 2px #007bff';
       this.isProgrammaticFocus = false;
     });
+
     const extractValue = () => (el.textContent ?? '').replace(/\r?\n/g, ' ');
+    
     const commit = (after?: (from: number) => void) => {
-      const latestBlock = this.getBlockAtFrom(view.state, this.block.from);
-      if (!latestBlock) return;
+      const container = getTableWidgetContainer(el);
+      const domFrom = getFromFromContainer(container);
+      
+      if (domFrom === null) {
+          logError('commit: Failed to find container/from');
+          return;
+      }
+
+      const latestBlock = this.getBlockAtFrom(view.state, domFrom);
+      if (!latestBlock) {
+          logError('commit: Block not found in state');
+          return;
+      }
+
       const currentValue = (tag === 'th' ? latestBlock.headers[col] : (latestBlock.rows[row!]?.[col] ?? ''));
       const newValue = extractValue();
+      
       if (currentValue === newValue) {
-          log('commit: no change');
           if (after) {
               setTimeout(() => {
                   after(latestBlock.from);
@@ -855,9 +866,9 @@ class TableWidget extends WidgetType {
           }
           return;
       }
-      log(`commit: value changed to "${newValue}"`);
-      updateValue(newValue, after);
+      updateValue(newValue, after, domFrom);
     }
+
     el.addEventListener('blur', (e: FocusEvent) => {
       el.style.boxShadow = 'none';
       if (this.isProgrammaticFocus) return; 
@@ -866,32 +877,36 @@ class TableWidget extends WidgetType {
         return; 
       }
       const relatedTarget = e.relatedTarget as HTMLElement | null;
-      const container = this.container; 
+      const container = getTableWidgetContainer(el);
       if (container && relatedTarget && container.contains(relatedTarget)) return; 
       if (!el.isConnected) return; 
       commit(); 
     });
-    el.addEventListener('keydown', (e) => {
-      if (e.isComposing) {
-          return;
-      }
 
+    el.addEventListener('keydown', (e) => {
+      if (e.isComposing) return;
+      
       if (e.key === 'Enter') {
+        log(`[DEBUG] Cell Keydown: Enter detected in buildCell listener`);
         e.preventDefault();
-        log('keydown: Enter');
-        const container = getTableWidgetContainer(el);
-        if (!container) return;
+        e.stopPropagation(); 
         
-        // 最新のDOM属性を参照
+        const container = getTableWidgetContainer(el);
+        if (!container) {
+            logError('keydown: Enter - Container not found');
+            return;
+        }
+        
         const rowCount = parseInt(container.dataset.rowCount || '0', 10);
         const rc = getCellRC(el);
-        if (!rc || rc.row == null) return;
+        if (!rc || rc.row == null) {
+            logError('keydown: Enter - Cannot determine cell RC');
+            return;
+        }
         
         const currentRow = rc.row;
         const currentCol = rc.col;
         
-        log(`Processing Enter at Row=${currentRow}, Col=${currentCol}. Total Rows=${rowCount}`);
-
         commit((latestFrom) => {
              if (currentRow < rowCount - 1) {
                  log(`Not last row. Moving focus to Row=${currentRow + 1}`);
@@ -900,13 +915,16 @@ class TableWidget extends WidgetType {
                  log(`Last row detected. Adding new row.`);
                  
                  const block = this.getBlockAtFrom(view.state, latestFrom);
-                 if (!block) return;
+                 if (!block) {
+                     logError('keydown: Enter - Block not found during row addition');
+                     return;
+                 }
                  
                  const currentCols = Math.max(block.headers.length, ...block.rows.map(r => r.length));
                  const newRow = Array(currentCols).fill('');
                  const updated: TableBlock = { ...block, rows: [...block.rows, newRow] };
                  
-                 this.dispatchReplace(view, updated, null, (finalFrom) => {
+                 this.dispatchReplace(view, latestFrom, updated, null, (finalFrom) => {
                      const newRowIndex = rowCount; 
                      log(`Row added. Focusing Row=${newRowIndex}`);
                      this.focusCellAt(view, finalFrom ?? latestFrom, newRowIndex, currentCol);
@@ -915,13 +933,18 @@ class TableWidget extends WidgetType {
         });
         return;
       }
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
+      
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
           this.clearSelection();
       }
     });
     return el;
   }
+
   private showContextMenu = (view: EditorView, container: HTMLElement, rc: { row: number | null; col: number }, x: number, y: number) => {
+    const from = getFromFromContainer(container);
+    if (from === null) return;
+
     container.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
     const menu = document.createElement('div');
     menu.className = 'cm-table-menu';
@@ -936,6 +959,7 @@ class TableWidget extends WidgetType {
     menu.style.fontFamily = 'sans-serif';
     menu.style.fontSize = '14px';
     menu.style.minWidth = '120px';
+    
     const mkItem = (label: string, cb: () => void, enabled = true) => {
       const it = document.createElement('div');
       it.style.padding = '4px 12px';
@@ -961,6 +985,7 @@ class TableWidget extends WidgetType {
       }
     };
     setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
+    
     const rowOpsEnabled = rc.row != null;
     const colOpsEnabled = true;
     menu.appendChild(mkItem('上に行を挿入', () => this.insertRow(view, container, rc.col, rc.row!, 'above'), rowOpsEnabled));
@@ -976,28 +1001,34 @@ class TableWidget extends WidgetType {
     menu.appendChild(mkItem('列を削除', () => this.deleteCol(view, container, rc.col), colOpsEnabled));
     document.body.appendChild(menu);
   }
+
   private insertRow = (view: EditorView, container: HTMLElement, col: number, row: number, where: 'above' | 'below') => {
-    const from = parseInt(container.dataset.from!, 10);
+    const from = getFromFromContainer(container);
+    if (from === null) return;
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     const colCount = Math.max(block.headers.length, ...block.rows.map(r => r.length));
     const at = where === 'above' ? row : row + 1;
     const newRows = block.rows.slice();
     newRows.splice(at, 0, Array(colCount).fill(''));
     const updated: TableBlock = { ...block, rows: newRows };
-    this.dispatchReplace(view, updated, null, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, at, col));
+    this.dispatchReplace(view, from, updated, null, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, at, col));
   }
+
   private deleteRow = (view: EditorView, container: HTMLElement, row: number) => {
-    const from = parseInt(container.dataset.from!, 10);
+    const from = getFromFromContainer(container);
+    if (from === null) return;
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     if (block.rows.length === 0) return;
     const newRows = block.rows.slice();
     const focusRow = Math.max(0, Math.min(row, newRows.length - 2));
     newRows.splice(row, 1);
     const updated: TableBlock = { ...block, rows: newRows };
-    this.dispatchReplace(view, updated, null, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, focusRow, 0));
+    this.dispatchReplace(view, from, updated, null, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, focusRow, 0));
   }
+
   private insertCol = (view: EditorView, container: HTMLElement, col: number, row: number | null, where: 'left' | 'right') => {
-    const from = parseInt(container.dataset.from!, 10);
+    const from = getFromFromContainer(container);
+    if (from === null) return;
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     const at = where === 'left' ? col : col + 1;
     const headers = block.headers.slice();
@@ -1016,10 +1047,12 @@ class TableWidget extends WidgetType {
         newWidths = currentWidths.slice();
         newWidths.splice(at, 0, 100); 
     }
-    this.dispatchReplace(view, updated, newWidths, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, row, at));
+    this.dispatchReplace(view, from, updated, newWidths, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, row, at));
   }
+
   private deleteCol = (view: EditorView, container: HTMLElement, col: number) => {
-    const from = parseInt(container.dataset.from!, 10);
+    const from = getFromFromContainer(container);
+    if (from === null) return;
     const block = this.getBlockAtFrom(view.state, from) ?? this.block;
     const headers = block.headers.slice();
     if (headers.length <= 1) return;
@@ -1039,7 +1072,7 @@ class TableWidget extends WidgetType {
         newWidths = currentWidths.slice();
         newWidths.splice(col, 1); 
     }
-    this.dispatchReplace(view, updated, newWidths, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, 0, newCol));
+    this.dispatchReplace(view, from, updated, newWidths, (latestFrom) => this.focusCellAt(view, latestFrom ?? from, 0, newCol));
   }
 }
 
@@ -1073,30 +1106,50 @@ export const tableDecoField = StateField.define<DecorationSet>({
 });
 
 // Keymap helpers...
-// ★ 修正: フォーカス判定を緩和 (view.hasFocus に依存しない)
 function getActiveCellContext(view: EditorView) {
   const focused = document.activeElement;
-  if (!focused || (focused.tagName !== 'TH' && focused.tagName !== 'TD')) return null;
+  // log(`getActiveCellContext: ActiveElement is <${focused?.tagName.toLowerCase()}> className="${focused?.className}"`);
+
+  if (!focused || (focused.tagName !== 'TH' && focused.tagName !== 'TD')) {
+      // logError('getActiveCellContext: Focused element is not TH or TD');
+      return null;
+  }
   
-  // ここで Widget 内の要素かどうか確認
   const container = getTableWidgetContainer(focused as HTMLElement);
-  if (!container) return null;
+  if (!container) {
+      logError('getActiveCellContext: Table widget container not found for focused element');
+      return null;
+  }
   
   const rc = getCellRC(focused as HTMLElement);
-  if (!rc) return null;
+  if (!rc) {
+      logError('getActiveCellContext: Could not determine Row/Col index');
+      return null;
+  }
   
-  const from = parseInt(container.dataset.from!, 10);
+  const from = getFromFromContainer(container);
+  if (from === null) {
+      logError('getActiveCellContext: "data-from" attribute missing on container');
+      return null;
+  }
+
   const colCount = parseInt(container.dataset.colCount!, 10);
   const rowCount = parseInt(container.dataset.rowCount!, 10);
+  
   const block = parseTablesInDoc(view.state).find(b => b.from === from) ?? null;
-  if (!block) return null;
+  if (!block) {
+      logError(`getActiveCellContext: Block not found for from=${from}. Navigation might fail if structure info is needed.`);
+  }
   
   return { ...rc, from, colCount, rowCount, block, el: focused as HTMLElement };
 }
 
 function focusCell(view: EditorView, from: number, row: number | null, col: number) {
   const container = document.querySelector(`.cm-md-table-widget[data-from="${from}"]`) as HTMLElement | null;
-  if (!container) return;
+  if (!container) {
+      logError(`focusCell: Container not found for from=${from}`);
+      return;
+  }
   let target: HTMLElement | null = null;
   if (row == null || row < 0) {
     target = container.querySelector(`thead tr > :nth-child(${col + 1})`) as HTMLElement | null;
@@ -1105,6 +1158,7 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
     if (tr) target = tr.children[col] as HTMLElement | null;
   }
   if (target) {
+    log(`focusCell: Navigating to Row=${row}, Col=${col}`);
     setTimeout(() => {
         target?.focus();
         try {
@@ -1118,8 +1172,11 @@ function focusCell(view: EditorView, from: number, row: number | null, col: numb
           }
         } catch { /* noop */ }
     }, 0);
+  } else {
+      logError(`focusCell: Target cell not found. Row=${row}, Col=${col}`);
   }
 }
+
 function cmdTab(view: EditorView): boolean {
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
@@ -1134,6 +1191,7 @@ function cmdTab(view: EditorView): boolean {
   focusCell(view, from, nRow < 0 ? null : nRow, nCol);
   return true;
 }
+
 function cmdShiftTab(view: EditorView): boolean {
   const ctx = getActiveCellContext(view);
   if (!ctx) return false;
@@ -1148,6 +1206,7 @@ function cmdShiftTab(view: EditorView): boolean {
   focusCell(view, from, nRow < 0 ? null : nRow, nCol);
   return true;
 }
+
 function moveHorizontal(dir: 'left' | 'right') {
   return (view: EditorView): boolean => {
     log(`moveHorizontal called: ${dir}`);
@@ -1158,17 +1217,21 @@ function moveHorizontal(dir: 'left' | 'right') {
     }
     const { from, row, col, colCount } = ctx;
     const nCol = clamp(col + (dir === 'left' ? -1 : 1), 0, colCount - 1);
-    if (nCol === col) return false;
+    if (nCol === col) {
+        log('moveHorizontal: Boundary reached');
+        return false; 
+    }
     focusCell(view, from, row, nCol);
     return true;
   };
 }
+
 function moveVertical(dir: 'up' | 'down') {
   return (view: EditorView): boolean => {
     log(`moveVertical called: ${dir}`);
     const ctx = getActiveCellContext(view);
     if (!ctx) {
-        log('moveVertical: No context found');
+        log('moveVertical: No context found (ActiveElement check failed)');
         return false;
     }
     const { from, row, col, rowCount } = ctx;
@@ -1176,20 +1239,31 @@ function moveVertical(dir: 'up' | 'down') {
     if (dir === 'up') {
       if (nRow === 0) nRow = null; 
       else if (nRow > 0) nRow = nRow - 1; 
-      else return false; 
+      else {
+          log('moveVertical: Top boundary reached');
+          return false; 
+      }
     } else {
       if (nRow === null) nRow = 0; 
       else if (nRow < rowCount - 1) nRow = nRow + 1; 
-      else return false; 
+      else {
+          log('moveVertical: Bottom boundary reached');
+          return false; 
+      }
     }
     focusCell(view, from, nRow, col);
     return true;
   };
 }
+
 function moveVerticalPage(dir: 'up' | 'down') {
     return (view: EditorView): boolean => {
+        log(`moveVerticalPage called: ${dir}`);
         const ctx = getActiveCellContext(view);
-        if (!ctx) return false;
+        if (!ctx) {
+            logError('moveVerticalPage: Context not found');
+            return false;
+        }
         const { from, col, row, rowCount } = ctx;
         let nRow: number | null;
         if (dir === 'up') {
@@ -1203,10 +1277,15 @@ function moveVerticalPage(dir: 'up' | 'down') {
         return true;
     };
 }
+
 function moveHorizontalPage(dir: 'home' | 'end') {
     return (view: EditorView): boolean => {
+        log(`moveHorizontalPage called: ${dir}`);
         const ctx = getActiveCellContext(view);
-        if (!ctx) return false;
+        if (!ctx) {
+            logError('moveHorizontalPage: Context not found');
+            return false;
+        }
         const { from, row, col, colCount } = ctx;
         let nCol: number;
         if (dir === 'home') {
@@ -1220,6 +1299,7 @@ function moveHorizontalPage(dir: 'home' | 'end') {
         return true;
     };
 }
+
 function copySelectionTSV(_view: EditorView): boolean {
   return false;
 }
