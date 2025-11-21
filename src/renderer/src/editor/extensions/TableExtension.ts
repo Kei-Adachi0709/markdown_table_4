@@ -15,7 +15,7 @@ import {
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
-console.log('%c TableExtension Loaded (Fixed v14: Fix Variable Typo) ', 'background: #006400; color: #fff; font-weight: bold; padding: 4px;');
+console.log('%c TableExtension Loaded (Fixed v15: Copy Logic from v2) ', 'background: #008080; color: #fff; font-weight: bold; padding: 4px;');
 
 const logPrefix = '[TableExt]';
 function log(msg: string, ...args: any[]) {
@@ -342,7 +342,6 @@ class TableWidget extends WidgetType {
       const newText = serializeTable(updated.headers, updated.aligns, updated.rows);
       const changes = { from: latestBlock.from, to: latestBlock.to, insert: newText };
       
-      // ★ 修正箇所: 変数名のタイポを修正 (constKv_tempTr -> const tempTr)
       const tempTr = view.state.update({ changes });
       const newFrom = tempTr.changes.mapPos(latestBlock.from, 1);
       
@@ -627,13 +626,20 @@ class TableWidget extends WidgetType {
       let newRows = dataRowsIndices.map(r => extractCols(safeRows[r]));
       let newHeaders: string[] = [];
 
+      // ★ TableExtension_2 のロジックを適用
       if (hasOriginalHeader) {
           newHeaders = extractCols(safeHeaders);
+      } else if (newRows.length > 0) {
+          // ヘッダーが含まれていない場合、選択範囲の1行目をヘッダーとして使う
+          newHeaders = newRows[0];
+          newRows = newRows.slice(1);
       } else {
           newHeaders = targetCols.map(() => '');
       }
 
       let markdownTable = serializeTable(newHeaders, newAligns, newRows);
+      
+      // ★ 前後に改行を追加してペースト時の結合を防ぐ
       markdownTable = '\n' + markdownTable + '\n';
 
       log('performCopy: Copied to clipboard');
