@@ -15,10 +15,11 @@ import {
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
-console.log('%c TableExtension Loaded (Fixed v15: Copy Logic from v2) ', 'background: #008080; color: #fff; font-weight: bold; padding: 4px;');
+console.log('%c TableExtension Loaded (Fixed v16: Context Menu Clean-up) ', 'background: #800080; color: #fff; font-weight: bold; padding: 4px;');
 
 const logPrefix = '[TableExt]';
 function log(msg: string, ...args: any[]) {
+  // ログ出力は維持
   console.log(`%c${logPrefix} ${new Date().toISOString().slice(11, 23)}`, 'color: #00d1b2; font-weight: bold;', msg, ...args);
 }
 
@@ -626,11 +627,10 @@ class TableWidget extends WidgetType {
       let newRows = dataRowsIndices.map(r => extractCols(safeRows[r]));
       let newHeaders: string[] = [];
 
-      // ★ TableExtension_2 のロジックを適用
+      // ★ TableExtension_2 のロジックを維持
       if (hasOriginalHeader) {
           newHeaders = extractCols(safeHeaders);
       } else if (newRows.length > 0) {
-          // ヘッダーが含まれていない場合、選択範囲の1行目をヘッダーとして使う
           newHeaders = newRows[0];
           newRows = newRows.slice(1);
       } else {
@@ -638,8 +638,6 @@ class TableWidget extends WidgetType {
       }
 
       let markdownTable = serializeTable(newHeaders, newAligns, newRows);
-      
-      // ★ 前後に改行を追加してペースト時の結合を防ぐ
       markdownTable = '\n' + markdownTable + '\n';
 
       log('performCopy: Copied to clipboard');
@@ -951,7 +949,10 @@ class TableWidget extends WidgetType {
     const from = getFromFromContainer(container);
     if (from === null) return;
 
-    container.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
+    // ★ 修正: container内のメニューだけでなく、ドキュメント全体から古いメニューを削除する
+    // これにより、メニューが重なって表示されるのを防ぐ
+    document.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
+
     const menu = document.createElement('div');
     menu.className = 'cm-table-menu';
     menu.style.position = 'fixed';
