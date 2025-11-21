@@ -15,11 +15,10 @@ import {
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
-console.log('%c TableExtension Loaded (Fixed v16: Context Menu Clean-up) ', 'background: #800080; color: #fff; font-weight: bold; padding: 4px;');
+console.log('%c TableExtension Loaded (Fixed v18: Delete Logic) ', 'background: #000080; color: #fff; font-weight: bold; padding: 4px;');
 
 const logPrefix = '[TableExt]';
 function log(msg: string, ...args: any[]) {
-  // ログ出力は維持
   console.log(`%c${logPrefix} ${new Date().toISOString().slice(11, 23)}`, 'color: #00d1b2; font-weight: bold;', msg, ...args);
 }
 
@@ -223,6 +222,11 @@ class TableWidget extends WidgetType {
   private isOpeningContextMenu = false;
   private isProgrammaticFocus = false;
   private isDragging = false;
+  
+  // ★ 削除ロジック用の状態追加
+  private lastDeleteTime = 0;
+  private DELETE_DOUBLE_CLICK_THRESHOLD = 500; // ms
+
   private selection: SelectionState = {
       type: 'none',
       anchor: null,
@@ -312,6 +316,10 @@ class TableWidget extends WidgetType {
             return false; 
         }
         if (key === 'Enter') {
+            return true;
+        }
+        // ★ DeleteキーもWidget内で処理する
+        if (key === 'Delete' || key === 'Backspace') {
             return true;
         }
         if (key.length === 1 && !(event as KeyboardEvent).ctrlKey && !(event as KeyboardEvent).metaKey && !(event as KeyboardEvent).altKey) {
@@ -627,7 +635,6 @@ class TableWidget extends WidgetType {
       let newRows = dataRowsIndices.map(r => extractCols(safeRows[r]));
       let newHeaders: string[] = [];
 
-      // ★ TableExtension_2 のロジックを維持
       if (hasOriginalHeader) {
           newHeaders = extractCols(safeHeaders);
       } else if (newRows.length > 0) {
@@ -653,6 +660,93 @@ class TableWidget extends WidgetType {
       this.performCopy(view);
   }
 
+  // ★ 削除実行ロジック
+  private performDelete = (view: EditorView, mode: 'content' | 'structure') => {
+      if (!this.container) return;
+      const currentFrom = getFromFromContainer(this.container);
+      if (currentFrom === null) return;
+
+      if (this.selection.type === 'none' || this.selection.selectedRows.size === 0) return;
+      const currentBlock = this.getBlockAtFrom(view.state, currentFrom);
+      if (!currentBlock) return;
+
+      log(`performDelete: mode=${mode}, selection=${this.selection.type}`);
+
+      if (mode === 'content') {
+          // 1回押し: 文字だけ消す (行/列の構造は維持)
+          const targetRows = Array.from(this.selection.selectedRows);
+          const targetCols = Array.from(this.selection.selectedCols);
+          
+          const newHeaders = [...currentBlock.headers];
+          const newRows = currentBlock.rows.map(r => [...r]);
+
+          targetCols.forEach(c => {
+              if (targetRows.includes(-1)) {
+                  if (newHeaders[c] !== undefined) newHeaders[c] = '';
+              }
+              targetRows.forEach(r => {
+                  if (r >= 0 && newRows[r] && newRows[r][c] !== undefined) {
+                      newRows[r][c] = '';
+                  }
+              });
+          });
+
+          const updated = { ...currentBlock, headers: newHeaders, rows: newRows };
+          this.dispatchReplace(view, currentFrom, updated);
+
+      } else {
+          // 2回押し: 構造ごと削除 (行削除 / 列削除)
+          // Rect選択の場合は、含まれる行・列をすべて消すか、構造を維持するかが難しいが、
+          // 今回は「行選択なら行削除」「列選択なら列削除」を優先し、Rectの場合は文字削除のみとするか、
+          // 要件に合わせて「選択範囲の行列そのものを消す」を実装する。
+          // ここでは「行・列選択時」に構造削除を行う。
+          
+          let newHeaders = [...currentBlock.headers];
+          let newAligns = [...currentBlock.aligns];
+          let newRows = currentBlock.rows.map(r => [...r]);
+          let newWidths: number[] | null = null;
+          const currentWidths = (view.state.field(colWidthsField) ?? {})[currentFrom];
+          if (currentWidths) newWidths = [...currentWidths];
+
+          if (this.selection.type === 'row') {
+              // 行削除
+              const targetRows = Array.from(this.selection.selectedRows).sort((a, b) => b - a); // 後ろから消す
+              targetRows.forEach(r => {
+                  if (r === -1) {
+                      // ヘッダー行は消せない（構造維持のため空にするだけにするか、テーブルごと消すか？
+                      // 通常はヘッダー削除=テーブル削除になりうるが、ここでは空にするだけにしておく安全策
+                      newHeaders.fill('');
+                  } else {
+                      if (r < newRows.length) newRows.splice(r, 1);
+                  }
+              });
+          } else if (this.selection.type === 'col') {
+              // 列削除
+              const targetCols = Array.from(this.selection.selectedCols).sort((a, b) => b - a); // 後ろから消す
+              targetCols.forEach(c => {
+                  newHeaders.splice(c, 1);
+                  newAligns.splice(c, 1);
+                  newRows.forEach(row => row.splice(c, 1));
+                  if (newWidths) newWidths.splice(c, 1);
+              });
+          } else {
+              // Rect選択の場合の構造削除は複雑（テーブルが崩れる）ため、文字削除にとどめるか、
+              // あるいは要件「行、列をマウスカーソルで範囲選択して」に従い、
+              // Rect選択でも無理やり削除するか。
+              // ここでは安全のため「Rect選択時の2回押し」は「文字削除（1回押しと同じ）」扱いとするか、
+              // ユーザーの意図として「選択範囲が含まれる行/列をすべて消す」のは危険。
+              // → 仕様上「行、列をマウスカーソルで範囲選択」とあるので、行選択・列選択モードのみ対象とするのが自然。
+              log('performDelete: Rect selection structure delete is skipped/fallback to content clear.');
+              this.performDelete(view, 'content');
+              return;
+          }
+
+          const updated = { ...currentBlock, headers: newHeaders, aligns: newAligns, rows: newRows };
+          this.dispatchReplace(view, currentFrom, updated, newWidths);
+          this.clearSelection(); // 削除後は選択解除
+      }
+  }
+
   private handleKeyDown = (e: KeyboardEvent, view: EditorView) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
           if (this.selection.type !== 'none') {
@@ -661,6 +755,27 @@ class TableWidget extends WidgetType {
               this.performCopy(view);
           }
       }
+      
+      // ★ Deleteキー処理
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (this.selection.type !== 'none') {
+              e.preventDefault();
+              e.stopPropagation();
+              
+              const now = Date.now();
+              const elapsed = now - this.lastDeleteTime;
+              this.lastDeleteTime = now;
+
+              if (elapsed < this.DELETE_DOUBLE_CLICK_THRESHOLD) {
+                  // 2回押し (Structure Delete)
+                  this.performDelete(view, 'structure');
+              } else {
+                  // 1回押し (Content Clear)
+                  this.performDelete(view, 'content');
+              }
+          }
+      }
+
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Shift-Tab'].includes(e.key)) {
           this.clearSelection();
       }
@@ -949,8 +1064,6 @@ class TableWidget extends WidgetType {
     const from = getFromFromContainer(container);
     if (from === null) return;
 
-    // ★ 修正: container内のメニューだけでなく、ドキュメント全体から古いメニューを削除する
-    // これにより、メニューが重なって表示されるのを防ぐ
     document.querySelectorAll('.cm-table-menu').forEach((m) => m.remove());
 
     const menu = document.createElement('div');
