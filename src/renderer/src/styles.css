@@ -4,6 +4,9 @@
   --panel-bg: #111827;
   --panel-border: #374151;
   --accent: #22d3ee;
+  --handle-color: #94a3b8;
+  --handle-hover: #22d3ee;
+  --drop-highlight: #22d3ee;
 }
 
 * { box-sizing: border-box; }
@@ -40,53 +43,122 @@ html, body, #root {
   min-height: 0;
 }
 
-.editor-toolbar {
-  height: 40px;
+/* テーブルスタイル */
+.cm-md-table-widget th,
+.cm-md-table-widget td {
+  position: relative;
+}
+
+/* ドラッグハンドル共通 */
+.cm-drag-handle {
+  position: absolute;
+  background-color: transparent;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  border-bottom: 1px solid #e5e7eb;
-  background: #ffffff;
-  color: #111827;
+  justify-content: center;
+  opacity: 0; /* ホバーで表示 */
+  transition: opacity 0.2s, background-color 0.2s;
+  z-index: 50; /* リサイザー(10)より上に配置 */
+  border-radius: 2px;
+  
+  /* ★重要: ハンドル上でテキスト選択を無効化し、ドラッグを優先させる */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: element;
+  cursor: grab;
 }
 
-.editor-host {
-  flex: 1;
-  min-height: 0;
-  background: #ffffff;
+/* ホバー時にハンドルを表示 */
+/* ヘッダーセル全体のホバー */
+.cm-md-table-widget th:hover .cm-drag-handle,
+/* 行（1列目）全体のホバー */
+.cm-md-table-widget tr:hover td:first-child .cm-drag-handle {
+  opacity: 1;
 }
 
-/* テーブルリサイズハンドル */
+/* 列用ハンドル (上部) */
+.cm-drag-handle-col {
+  top: -8px; /* 少し外側に配置 */
+  left: 0;
+  width: 100%;
+  height: 10px; /* クリック判定エリアを確保 */
+  cursor: grab;
+  
+  /* ドット柄の装飾 */
+  background-image: radial-gradient(circle, var(--handle-color) 1px, transparent 1px);
+  background-size: 4px 4px;
+  background-position: center;
+  background-repeat: repeat-x;
+}
+
+/* 行用ハンドル (左端) */
+.cm-drag-handle-row {
+  left: -10px; /* 少し外側に配置 */
+  top: 0;
+  width: 10px; /* クリック判定エリアを確保 */
+  height: 100%;
+  cursor: grab;
+
+  /* ドット柄の装飾 */
+  background-image: radial-gradient(circle, var(--handle-color) 1px, transparent 1px);
+  background-size: 4px 4px;
+  background-position: center;
+  background-repeat: repeat-y;
+}
+
+.cm-drag-handle:hover {
+  background-color: rgba(34, 211, 238, 0.3);
+  opacity: 1 !important; /* ハンドル自体のホバー時は強制表示 */
+}
+
+.cm-drag-handle:active {
+  cursor: grabbing;
+}
+
+/* ドロップターゲットのハイライト */
+/* 列ドロップ: 左側のボーダーを強調 */
+th.cm-drop-target {
+  position: relative;
+}
+th.cm-drop-target::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -2px;
+  height: 100%;
+  width: 4px;
+  background-color: var(--drop-highlight);
+  z-index: 60;
+  pointer-events: none;
+}
+
+/* 行ドロップ: 上側のボーダーを強調 */
+tr.cm-drop-target > td {
+  border-top: 2px solid var(--drop-highlight) !important;
+  background-color: rgba(34, 211, 238, 0.05) !important;
+}
+
+/* ドラッグ中のテーブル全体の状態 */
+.cm-table-dragging-active {
+  /* ドラッグ中はカーソルをgrabbingに */
+}
+
+/* リサイズハンドル (既存) */
 .cm-table-resizer {
   position: absolute;
   top: 0;
-  right: -2px; /* セルの境界線上に配置 */
-  width: 4px; /* クリック領域 */
+  right: -2px;
+  width: 4px;
   height: 100%;
   cursor: col-resize;
-  z-index: 10;
+  z-index: 20; /* ハンドル(50)より下、コンテンツより上 */
 }
 
-/* リサイズ中のテキスト選択を無効化 */
 body.cm-table-resizing {
   user-select: none;
   -webkit-user-select: none;
 }
-.cm-table-resizing .cm-editor {
-  user-select: none;
-  -webkit-user-select: none;
-}
 
-/* ★ 行・列選択時のハイライト */
 .cm-table-selected {
   background-color: rgba(0, 120, 255, 0.2) !important;
-}
-
-/* 選択モード時のカーソルスタイル (JSで動的に制御するが補助的に) */
-.cm-col-select-cursor {
-  cursor: s-resize !important; /* 下矢印 */
-}
-.cm-row-select-cursor {
-  cursor: e-resize !important; /* 右矢印 */
 }
