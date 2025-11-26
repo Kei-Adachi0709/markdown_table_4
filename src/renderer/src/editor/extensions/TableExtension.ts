@@ -11,18 +11,20 @@ import {
   TransactionSpec,
   StateField,
   Prec,
-  StateEffect
+  StateEffect,
+  Transaction
 } from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 
-// --- ロガー設定 (v2.4) ---
+// --- ロガー設定 (v2.9) ---
 const LOG_STYLES = {
   info: 'color: #00d1b2; font-weight: bold;',
   action: 'color: #3298dc; font-weight: bold;',
   success: 'color: #48c774; font-weight: bold;',
   warn: 'color: #ffdd57; font-weight: bold; background: #333;',
   error: 'color: #ff3860; font-weight: bold; background: #ffe5e5; padding: 4px; border: 1px solid #f00;',
-  debug: 'color: #aaa; font-style: italic;'
+  debug: 'color: #aaa; font-style: italic;',
+  hover: 'color: #ff00ff; font-weight: bold;' 
 };
 
 function logInfo(msg: string, ...args: any[]) {
@@ -52,7 +54,52 @@ function logDebug(msg: string, ...args: any[]) {
   console.log(`%c[TableExt:DEBUG] ${msg}`, LOG_STYLES.debug, ...args);
 }
 
-console.log('%c TableExtension Loaded (Debug & Fix v2.4 - Blur Conflict Fix) ', 'background: #6e40aa; color: #fff; font-weight: bold; padding: 4px;');
+// --- 診断用ユーティリティ ---
+let lastHoverLogTime = 0;
+function logHandleDebug(e: MouseEvent, container: HTMLElement | null) {
+  const now = Date.now();
+  if (now - lastHoverLogTime < 500) return; // ログ過多防止
+  lastHoverLogTime = now;
+
+  const x = e.clientX;
+  const y = e.clientY;
+  const target = document.elementFromPoint(x, y);
+  
+  // マウス直下の要素
+  let targetInfo = 'null';
+  if (target) {
+    targetInfo = `${target.tagName.toLowerCase()}.${Array.from(target.classList).join('.')}`;
+  }
+
+  // 近くにあるハンドルの検出
+  let nearbyHandleInfo = 'None';
+  if (container) {
+    const handles = container.querySelectorAll('.cm-drag-handle');
+    let minDist = 1000;
+    let closestHandle: Element | null = null;
+
+    handles.forEach(h => {
+      const rect = h.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dist = Math.sqrt(Math.pow(x - cx, 2) + Math.pow(y - cy, 2));
+      if (dist < minDist) {
+        minDist = dist;
+        closestHandle = h;
+      }
+    });
+
+    if (closestHandle && minDist < 50) {
+      const h = closestHandle as HTMLElement;
+      const rect = h.getBoundingClientRect();
+      nearbyHandleInfo = `Dist:${minDist.toFixed(1)}px, Class:${h.className}, Rect:[${rect.left.toFixed(0)},${rect.top.toFixed(0)},${rect.width.toFixed(0)}x${rect.height.toFixed(0)}], Z-Index:${getComputedStyle(h).zIndex}`;
+    }
+  }
+
+  console.log(`%c[HANDLE_DEBUG] Mouse:(${x},${y}) Target:${targetInfo} | NearestHandle: ${nearbyHandleInfo}`, LOG_STYLES.hover);
+}
+
+console.log('%c TableExtension Loaded (Fix v2.9 - Undo Fix & Deep Debug) ', 'background: #6e40aa; color: #fff; font-weight: bold; padding: 4px;');
 
 type Align = 'left' | 'right' | 'center' | null;
 
@@ -195,15 +242,17 @@ function getCellRC(el: HTMLElement | null): { row: number | null; col: number } 
   const col = cell.cellIndex;
   const rowEl = cell.closest('tr');
   if (!rowEl) return null;
-  const head = rowEl.closest('thead');
-  if (head) return { row: null, col };
-  const tbody = rowEl.closest('tbody');
-  if (tbody) {
-      const table = rowEl.closest('table');
-      const theadRowCount = table?.tHead?.rows.length ?? 0;
-      return { row: rowEl.rowIndex - theadRowCount, col }; 
+  
+  const parent = rowEl.parentElement;
+  if (parent && parent.tagName === 'THEAD') {
+      return { row: null, col };
+  } else if (parent && parent.tagName === 'TBODY') {
+      return { row: rowEl.sectionRowIndex, col };
   }
-  return { row: rowEl.rowIndex, col };
+  
+  const table = rowEl.closest('table');
+  const theadRowCount = table?.tHead?.rows.length ?? 0;
+  return { row: rowEl.rowIndex - theadRowCount, col };
 }
 
 function getFromFromContainer(container: HTMLElement | null): number | null {
@@ -217,7 +266,6 @@ class TableWidget extends WidgetType {
   private isProgrammaticFocus = false;
   private isDraggingSelection = false;
   
-  // ★重要: DnDなどの操作中に意図しないBlurコミットを防ぐためのフラグ
   private isInteracting = false; 
 
   private dragState: DragState = {
@@ -239,7 +287,7 @@ class TableWidget extends WidgetType {
   }
 
   eq(other: WidgetType): boolean {
-    return false; // 強制再描画（バグ回避のため維持）
+    return false;
   }
 
   // --- DnD Handlers ---
@@ -248,7 +296,7 @@ class TableWidget extends WidgetType {
     logAction(`Drag Start: Type=${type}, Index=${index}`);
     e.stopPropagation(); 
     
-    this.isInteracting = true; // 操作開始
+    this.isInteracting = true;
     this.dragState = {
       type,
       fromIndex: index,
@@ -326,8 +374,6 @@ class TableWidget extends WidgetType {
       this.dragState = { type: null, fromIndex: -1, isDragging: false };
       if (this.container) this.container.classList.remove('cm-table-dragging-active');
       
-      // ドロップ処理が完了し、DOM更新が落ち着くまでインタラクションフラグを残す
-      // これにより、遅れてくるblurイベントによる上書きを防ぐ
       setTimeout(() => {
           this.isInteracting = false;
       }, 200);
@@ -339,13 +385,12 @@ class TableWidget extends WidgetType {
     this.dragState = { type: null, fromIndex: -1, isDragging: false };
     if (this.container) this.container.classList.remove('cm-table-dragging-active');
     
-    // ドラッグがキャンセルされた場合など
     setTimeout(() => {
         this.isInteracting = false;
     }, 200);
   };
 
-  // --- Move Logic (Array manipulation) ---
+  // --- Move Logic ---
   
   private moveColumn(view: EditorView, from: number, to: number) {
     const fromPos = getFromFromContainer(this.container);
@@ -356,7 +401,6 @@ class TableWidget extends WidgetType {
 
     const block = this.getBlockAtFrom(view.state, fromPos) ?? this.block;
     
-    // ヘルパー: 配列の要素移動
     const moveArrayItem = <T>(arr: T[], fromIdx: number, toIdx: number): T[] => {
       const clone = [...arr];
       if (fromIdx < 0 || fromIdx >= clone.length) return clone;
@@ -369,7 +413,6 @@ class TableWidget extends WidgetType {
 
     try {
       const newHeaders = moveArrayItem(block.headers, from, to);
-      
       const fullAligns = [...block.aligns];
       while (fullAligns.length < block.headers.length) fullAligns.push(null);
       const newAligns = moveArrayItem(fullAligns, from, to);
@@ -435,20 +478,29 @@ class TableWidget extends WidgetType {
 
   ignoreEvent(event: Event): boolean {
     if (event.type === 'keydown') {
-        const key = (event as KeyboardEvent).key;
-        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'PageUp', 'PageDown', 'Home', 'End'].includes(key)) return false; 
+        const ke = event as KeyboardEvent;
+        if (ke.ctrlKey || ke.metaKey) {
+            // Undo/Redo用にCodeMirrorへ通す
+            return false; 
+        }
+        const key = ke.key;
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'PageUp', 'PageDown', 'Home', 'End'].includes(key)) {
+            return false; 
+        }
         if (key === 'Enter') return true;
-        if (key.length === 1 && !(event as KeyboardEvent).ctrlKey && !(event as KeyboardEvent).metaKey && !(event as KeyboardEvent).altKey) return true;
-        return false;
+        return false; 
     }
+    
     if (event.type === 'mousedown') {
       const target = event.target as HTMLElement;
       if (target.classList.contains('cm-drag-handle') || target.classList.contains('cm-table-resizer')) {
-        return true;
+        return true; 
       }
       return true; 
     }
-    if (event.type === 'copy') return true;
+    
+    if (event.type === 'copy' || event.type === 'cut' || event.type === 'paste') return false;
+    
     return true;
   }
 
@@ -474,19 +526,24 @@ class TableWidget extends WidgetType {
       
       const newText = serializeTable(updated.headers, updated.aligns, updated.rows);
       
-      // logDebug('Serialized Text Preview:', newText.split('\n')[0]); 
-
       const changes = { from: latestBlock.from, to: latestBlock.to, insert: newText };
       
-      const tempTr = view.state.update({ changes });
-      const newFrom = tempTr.changes.mapPos(latestBlock.from, 1);
-      
+      // ★修正: Undoできるようにトランザクションアノテーションを明確に付与
       const finalSpec: TransactionSpec = {
           changes,
-          effects: (newWidths && newFrom !== null) ? updateColWidthEffect.of({ from: newFrom, widths: newWidths }) : []
+          effects: (newWidths && newFrom !== null) ? updateColWidthEffect.of({ from: newFrom, widths: newWidths }) : [],
+          annotations: [
+              Transaction.addToHistory.of(true),
+              Transaction.userEvent.of("input")
+          ]
       };
 
-      view.dispatch(finalSpec);
+      // 非同期更新のため、最新のステートからupdateを作成
+      const tr = view.state.update(finalSpec);
+      view.dispatch(tr);
+      
+      // mapPosにはtrのchangesを使う
+      const newFrom = tr.changes.mapPos(latestBlock.from, 1);
       
       if (after) {
           requestAnimationFrame(() => after(newFrom ?? latestBlock.from));
@@ -654,10 +711,31 @@ class TableWidget extends WidgetType {
   }
 
   private handleMouseMove = (e: MouseEvent) => {
+    // --- 診断ログ (デバッグ用) ---
+    logHandleDebug(e, this.container);
+    // -------------------------
+
     if (document.body.classList.contains('cm-table-resizing')) return;
+    
+    const target = e.target as HTMLElement;
+    
+    this.container?.querySelectorAll('.cm-drag-handle').forEach(h => {
+        (h as HTMLElement).style.opacity = '';
+    });
+
+    const targetCell = target.closest('th, td') as HTMLTableCellElement | null;
+    if (targetCell) {
+        if (targetCell.tagName === 'TD' && targetCell.cellIndex === 0) {
+            const rowHandle = targetCell.querySelector('.cm-drag-handle-row') as HTMLElement;
+            if (rowHandle) rowHandle.style.opacity = '1';
+        }
+        if (targetCell.tagName === 'TH') {
+            const colHandle = targetCell.querySelector('.cm-drag-handle-col') as HTMLElement;
+            if (colHandle) colHandle.style.opacity = '1';
+        }
+    }
+
     if (this.isDraggingSelection) {
-        const target = e.target as HTMLElement;
-        const targetCell = target.closest('th, td') as HTMLElement | null;
         if (targetCell) {
             const rc = getCellRC(targetCell);
             if (rc) {
@@ -668,13 +746,11 @@ class TableWidget extends WidgetType {
         return;
     }
     
-    const target = e.target as HTMLElement;
     if (target.classList.contains('cm-drag-handle')) {
         target.style.cursor = 'grab';
         return;
     }
 
-    const targetCell = target.closest('th, td') as HTMLElement | null;
     if (this.container) this.container.style.cursor = 'default';
     if (targetCell) targetCell.style.cursor = 'text';
     
@@ -688,9 +764,6 @@ class TableWidget extends WidgetType {
     if ((e.target as HTMLElement).classList.contains('cm-drag-handle')) return; 
 
     if (e.button !== 0) return;
-
-    // 操作開始とみなす
-    // this.isInteracting = true; // ここでtrueにすると通常のクリックでの編集もブロックされる恐れがあるので、DnD開始時のみにする
 
     const action = this.getMouseAction(e);
     const onMouseUp = () => {
@@ -725,6 +798,42 @@ class TableWidget extends WidgetType {
     handle.draggable = true;
     handle.contentEditable = 'false'; 
     
+    // ★ハンドルスタイルの強化 (さらに大きく、最前面へ)
+    handle.style.position = 'absolute';
+    handle.style.zIndex = '2147483647'; // 最大値
+    handle.style.backgroundColor = '#cbd5e1'; 
+    handle.style.borderRadius = '3px';
+    handle.style.transition = 'background-color 0.2s, opacity 0.2s';
+    handle.style.opacity = '0.6'; // デフォルト視認性を少し上げる
+
+    if (type === 'row') {
+        handle.style.width = '14px'; // 少し幅広に
+        handle.style.height = '18px';
+        handle.style.left = '1px'; // 左端ギリギリ
+        handle.style.top = '50%'; 
+        handle.style.transform = 'translateY(-50%)';
+        handle.style.cursor = 'grab';
+        // クリックイベントを透過させない
+        handle.style.pointerEvents = 'auto';
+    } else {
+        handle.style.width = '36px';
+        handle.style.height = '10px';
+        handle.style.left = '50%';
+        handle.style.top = '-5px'; // 少し下げる
+        handle.style.transform = 'translateX(-50%)';
+        handle.style.cursor = 'grab';
+        handle.style.pointerEvents = 'auto';
+    }
+
+    handle.addEventListener('mouseenter', () => {
+        handle.style.backgroundColor = '#22d3ee'; 
+        handle.style.opacity = '1';
+    });
+    handle.addEventListener('mouseleave', () => {
+        handle.style.backgroundColor = '#cbd5e1';
+        handle.style.opacity = '0.6';
+    });
+
     handle.addEventListener('dragstart', (e) => this.handleDragStart(e, type, index));
     handle.addEventListener('dragend', this.handleDragEnd);
     return handle;
@@ -740,7 +849,7 @@ class TableWidget extends WidgetType {
           const container = getTableWidgetContainer(th);
           if (!container) return;
           
-          this.isInteracting = true; // リサイズ中もコミット禁止
+          this.isInteracting = true; 
 
           const table = container.querySelector('table');
           if (!table) return;
@@ -781,6 +890,8 @@ class TableWidget extends WidgetType {
       return resizer;
   }
 
+  // ... (buildCell, toDOM, etc. remain same, just ensuring they use createDragHandle with new styles)
+  // ... buildCell ...
   private buildCell = (
     tag: 'th' | 'td',
     text: string,
@@ -791,12 +902,12 @@ class TableWidget extends WidgetType {
     view: EditorView
   ) => {
     const el = document.createElement(tag);
+    el.style.position = 'relative'; 
     el.style.minWidth = '50px';
     el.style.textAlign = al ?? 'left';
     el.style.padding = '4px 8px';
     el.style.border = '1px solid #ccc';
     el.style.backgroundColor = tag === 'th' ? '#f0f0f0' : '#ffffff';
-    el.style.position = 'relative';
     el.style.outline = 'none';
 
     el.addEventListener('dragover', (e) => {
@@ -869,11 +980,7 @@ class TableWidget extends WidgetType {
     el.addEventListener('blur', (e: FocusEvent) => {
       el.style.boxShadow = 'none';
       if (this.isProgrammaticFocus) return; 
-      // ★修正: DnDやリサイズなどのインタラクション中はコミットしない
-      if (this.isInteracting) {
-          // logInfo('Blur commit skipped due to interaction');
-          return;
-      }
+      if (this.isInteracting) return;
 
       if (this.isOpeningContextMenu) {
         this.isOpeningContextMenu = false; 
@@ -929,6 +1036,7 @@ class TableWidget extends WidgetType {
     return el;
   }
 
+  // ... toDOM ...
   toDOM(view: EditorView): HTMLElement {
     const container = document.createElement('div');
     this.container = container; 
@@ -1034,6 +1142,7 @@ class TableWidget extends WidgetType {
   }
 
   // --- ContextMenu ---
+  // ... (showContextMenu, insertRow, deleteRow, insertCol, deleteCol remain same)
   private showContextMenu = (view: EditorView, container: HTMLElement, rc: { row: number | null; col: number }, x: number, y: number) => {
     this.isOpeningContextMenu = true;
     const from = getFromFromContainer(container);
